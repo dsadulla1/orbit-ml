@@ -50,14 +50,14 @@ docker compose --env-file .env -f docker/compose.yaml --profile local-llm up -d 
 docker compose --env-file .env -f docker/compose.yaml logs -f vllm   # first start downloads the weights
 ```
 
-The default is `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` with tensor
+The default is `nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq` (4-bit, about 17 GB) with tensor
 parallelism 2 on GPUs 0 and 1, served as `orbit-coder`. Tensor parallelism must
 divide the model's attention heads evenly, so a third GPU usually can't join;
 it stays free for other work. To change GPUs, edit `device_ids` in
 `compose.yaml` and keep `VLLM_TP` equal to its length. For a single 12 GB GPU,
 use `VLLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ`, `VLLM_TP=1` and one
-device ID; that model is dense, so also drop `--enable-expert-parallel` from the
-command.
+device ID. `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` is another 4-bit build of the
+same model; its card says `--enable-expert-parallel` is required.
 
 The image is pinned with `VLLM_IMAGE_TAG` (default `v0.29.0`). A local `latest` tag is
 often an old pull, so don't rely on it.
@@ -66,8 +66,9 @@ If the server doesn't come up:
 
 - **Out of memory / not enough KV cache:** lower `VLLM_MAX_MODEL_LEN` (16384 is plenty for
   orbit's prompts) or raise `VLLM_GPU_UTIL` slightly.
-- **Errors about expert parallelism:** remove `--enable-expert-parallel` from the command;
-  whether it's required depends on the vLLM version.
+- **MoE weights fail to load with TP=2 (shape or kernel errors):** add
+  `--enable-expert-parallel` to the `command` list in `compose.yaml`; whether it's needed
+  depends on the build and vLLM version.
 - **Container "unhealthy" while `curl localhost:8000/v1/models` works:** the healthcheck
   could not run `python3` in the image; the server itself is fine.
 

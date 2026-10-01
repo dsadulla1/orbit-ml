@@ -89,7 +89,7 @@ regression. Each run also reports a feature-free baseline for reference.
 
 ## Using a local model (vLLM)
 
-`docker/compose.yaml` includes a `vllm` service, by default Qwen3-Coder-30B-A3B (AWQ) split
+`docker/compose.yaml` includes a `vllm` service, by default Qwen3-Coder-30B-A3B (4-bit W4A16) split
 across two 12 GB GPUs:
 
 ```bash

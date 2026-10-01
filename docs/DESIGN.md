@@ -11,7 +11,7 @@
 
 | Module | Responsibility |
 |---|---|
-| `task.py` | Split data into train / validation / test, hide labels, profile the data, compute a baseline |
+| `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
 | `prompts.py` | System prompt (sandbox contract), draft/improve/debug templates, response parsing |
 | `llm.py` | Chat-completions client for any OpenAI-compatible endpoint |
 | `sandbox.py` | One locked-down `docker run` per experiment |
@@ -24,17 +24,25 @@
 ## Data flow and label hiding
 
 ```
-data.csv ──split──► train (60%)  ──► input/train.csv  (features + target)
-                    val   (20%)  ─┐
-                    test  (20%)  ─┴► input/test.csv   (features + orbit_id, shuffled together)
-                                     hidden/labels.csv (orbit_id, split, target)
+data.csv ──split──► test (20%)  ───────────────────────────────┐ held out, scored once
+                    development (80%) ──k folds──► fold i:     │
+                      input/fold_i/train.csv  (the other k-1 folds: features + target)
+                      input/fold_i/test.csv   (fold i + the test rows: features + orbit_id, no labels)
+                                     hidden/labels.csv (orbit_id, split, fold, target)
 ```
 
-`input/` is mounted read-only into the sandbox; `hidden/` is never mounted. Scripts must
-predict every row in `test.csv`. The orchestrator scores the validation rows after each
-experiment and the test rows once, for the final best experiment. Choosing among many
-experiments on the validation split can overfit to it; the gap between the best experiment's
-validation and test scores is shown in the report as a check.
+Datasets of up to about 10,000 development rows use 5-fold cross-validation (`--folds N` to
+change it); larger ones use a single 60/20/20 train / validation / test split (`--folds 1`),
+laid out as `input/train.csv` and `input/test.csv`.
+
+Only one fold's directory is mounted into a sandbox, read-only, so a script never sees another
+fold's labels; `hidden/` is never mounted. A script is run once per fold and must predict every
+row in that fold's `test.csv`. The orchestrator scores each fold's validation rows and ranks
+experiments by the mean, reporting the spread across folds. Test rows are scored once, for the
+final best experiment, from the average of its k fold predictions (the most common label for
+class predictions). Choosing among many experiments on the validation score can overfit to it;
+the gap between the best experiment's validation and test scores is shown in the report as a
+check. Cross-validation costs k sandbox runs per experiment.
 
 ## Search policy
 

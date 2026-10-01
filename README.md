@@ -32,8 +32,8 @@ flowchart LR
   alternates between repairing failed ones (using their stack traces) and refining the best
   one. Budgets cap steps, wall time and tokens.
 - **Honest scores.** The sandbox only gets the training data and *unlabeled* rows. Those rows
-  mix a validation split (used to rank experiments) and a test split (scored once, for the
-  final winner). The generated code can't see either set of labels, so it can't overfit or
+  mix validation rows (used to rank experiments, by default with 5-fold cross-validation on small
+  datasets) and a test split (scored once, for the final winner). The generated code can't see either set of labels, so it can't overfit or
   misreport its own score.
 - **Isolation.** Each experiment runs in a fresh container: no network, read-only root
   filesystem, all capabilities dropped, CPU/memory/process limits and a timeout. The dataset is
@@ -68,7 +68,7 @@ runs/20261001-120000-breast_cancer/
   report.md          summary, leaderboard, run stats
   journal.json       every experiment: stage, parent, plan, score, error, tokens
   task.json          metric, baseline, data profile
-  input/             train.csv + unlabeled test.csv (all the sandbox sees)
+  input/             train.csv + unlabeled test.csv, or fold_1/ ... fold_k/ with cross-validation
   hidden/labels.csv  validation/test labels (never mounted)
   nodes/007/         solution.py, prompt.md, response.md, stdout.txt, stderr.txt, predictions.csv
 ```
@@ -78,7 +78,7 @@ runs/20261001-120000-breast_cancer/
 | Command | What it does |
 |---|---|
 | `orbit explore DATA -t TARGET` | Print the data profile the agent will see |
-| `orbit run DATA -t TARGET [--metric M] [--steps N] [--minutes M] [--goal "..."]` | Run a search |
+| `orbit run DATA -t TARGET [--metric M] [--steps N] [--minutes M] [--folds K] [--goal "..."]` | Run a search |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |

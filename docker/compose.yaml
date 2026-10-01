@@ -1,0 +1,101 @@
+# orbit services. Run from the repository root so the shared .env is used:
+#   docker compose --env-file .env -f docker/compose.yaml build sandbox
+#   docker compose --env-file .env -f docker/compose.yaml up -d mlflow
+#   docker compose --env-file .env -f docker/compose.yaml --profile local-llm up -d vllm
+# See docker/README.md.
+
+name: orbit
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.16.1
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=sqlite:////mlflow/mlflow.db
+      - --artifacts-destination=/mlflow/artifacts
+      - --serve-artifacts
+    environment:
+      # Host-header allowlist (DNS-rebinding protection). Empty keeps MLflow's
+      # default of localhost plus private IP ranges; set a comma-separated list
+      # (wildcards allowed, e.g. "mlflow.example.org,*.lan") to reach the server by name.
+      MLFLOW_SERVER_ALLOWED_HOSTS: ${MLFLOW_ALLOWED_HOSTS:-}
+    ports:
+      # Unauthenticated, so localhost only by default. Set MLFLOW_BIND=0.0.0.0 to
+      # open it to a trusted private network.
+      - "${MLFLOW_BIND:-127.0.0.1}:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      # The image has no curl.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Build-only: orbit launches this image itself with `docker run`, one container
+  # per experiment. The profile keeps `docker compose up` from starting it.
+  sandbox:
+    build:
+      context: .
+      dockerfile: sandbox.Dockerfile
+    image: orbit-sandbox:latest
+    profiles: ["build"]
+
+  # Local OpenAI-compatible LLM server (optional). Sized for 2-3 x 12 GB Ampere GPUs.
+  # The endpoint is unauthenticated, so it is published on 127.0.0.1 only.
+  vllm:
+    # Pin a tested release (e.g. v0.30.0) rather than tracking latest.
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-latest}
+    profiles: ["local-llm"]
+    # The image entrypoint is `vllm serve`; these are its arguments.
+    # Single-GPU fallback: VLLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ, VLLM_TP=1,
+    # one entry in device_ids, and drop --enable-expert-parallel (dense model).
+    # Tool-calling flags (--enable-auto-tool-choice, --tool-call-parser) are not
+    # needed: orbit only uses plain chat completions.
+    command:
+      - --model=${VLLM_MODEL:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}
+      - --served-model-name=${VLLM_SERVED_NAME:-orbit-coder}
+      # TP must evenly divide the model's attention heads, so 3 usually fails;
+      # use 2 GPUs and leave the third free.
+      - --tensor-parallel-size=${VLLM_TP:-2}
+      # Required by the AWQ build of this MoE model.
+      - --enable-expert-parallel
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-32768}
+      - --gpu-memory-utilization=${VLLM_GPU_UTIL:-0.90}
+      - --host=0.0.0.0
+      - --port=8000
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "127.0.0.1:${VLLM_PORT:-8000}:8000"
+    volumes:
+      # Named volume by default; set HF_CACHE to a host path to reuse an existing cache.
+      - ${HF_CACHE:-hf-cache}:/root/.cache/huggingface
+    # PyTorch uses shared memory between tensor-parallel workers.
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Compose cannot split an env var into a list, so the GPU set is
+              # listed here. Keep its length equal to VLLM_TP.
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First start downloads and loads the weights; this can take well over 10 minutes.
+      start_period: 30m
+    restart: unless-stopped
+
+volumes:
+  mlflow-data:
+  hf-cache:

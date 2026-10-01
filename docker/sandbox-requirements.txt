@@ -1,0 +1,12 @@
+# Libraries available to generated experiment scripts. Keep in sync with
+# LIBRARIES in src/orbit/prompts.py. joblib and threadpoolctl come in via scikit-learn.
+# pandas 2.x on purpose: LLM-written code overwhelmingly assumes pandas 2 semantics
+# (e.g. select_dtypes(include="object") for text columns, which pandas 3 changes).
+numpy==2.3.5
+pandas==2.3.3
+scipy==1.18.1
+scikit-learn==1.9.1
+# CPU-only build of xgboost (same `import xgboost` API). The default xgboost
+# wheel pulls in nvidia-nccl on Linux, which adds hundreds of MB and is unused here.
+xgboost-cpu==3.4.1
+lightgbm==4.7.0

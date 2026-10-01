@@ -11,11 +11,14 @@
 
 | Module | Responsibility |
 |---|---|
+| `sources.py` | Fetch/copy local files, folders, zips and URLs into the run folder (size caps, safe extraction); collect tables and documents |
+| `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry |
+| `problem.py` | Resolve sources, plan, and prepare the task in one call |
 | `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
 | `prompts.py` | System prompt (sandbox contract), draft/improve/debug templates, response parsing |
 | `llm.py` | Chat-completions client for any OpenAI-compatible endpoint |
 | `sandbox.py` | One locked-down `docker run` per experiment |
-| `metrics.py` | Prediction-file validation and scoring (orchestrator side only) |
+| `metrics.py` | Prediction-file validation, scoring and eval-wording matching (orchestrator side only; metrics come from a fixed registry, never from generated code) |
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
 | `report.py` | Facts → narrative → number verification → `report.md` |

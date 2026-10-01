@@ -2,7 +2,8 @@
 
 **An LLM agent that designs, runs and compares ML experiments on its own, in a sandbox, with scores you can trust.**
 
-Point orbit at a CSV and a target column. It asks an LLM to write a complete training
+Describe a prediction problem in plain language and point orbit at the data: a CSV, a folder
+of tables and notes, a zip file or a URL. It asks an LLM to write a complete training
 script, runs that script in a locked-down Docker container, scores the predictions
 against labels the script never sees, and decides what to try next: a new approach,
 a fix for a crash, or a focused improvement to the current best. Every experiment is
@@ -11,6 +12,7 @@ whose numbers are checked against the actual results.
 
 ```
 $ orbit run examples/data/breast_cancer.csv --target diagnosis --steps 15
+$ orbit run my_task/ --goal "Predict each house's sale price" --eval "RMSE between log prices"
 ```
 
 ## How it works
@@ -78,10 +80,21 @@ runs/20261001-120000-breast_cancer/
 | Command | What it does |
 |---|---|
 | `orbit explore DATA -t TARGET` | Print the data profile the agent will see |
-| `orbit run DATA -t TARGET [--metric M] [--steps N] [--minutes M] [--folds K] [--goal "..."]` | Run a search |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K]` | Solve a problem: run a search |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
+
+### Describing a problem
+
+`DATA` can be any mix of CSV/TSV files, folders, zip files and `http(s)` URLs; text files such as a
+data description are read and shown to the model. `--goal` states the problem in plain language and
+`--eval` says how to judge it, either as a metric name or in words ("RMSE between log prices").
+Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
+answer against the files. Tables that don't hold the target are made available to the generated
+code under `data/extra/` (read-only), so they can be joined in; a table that only repeats the
+training columns without the target is ignored. Everything you point at is copied into the run folder.
+URLs are fetched with the host's network access, so only use sources you trust.
 
 Metrics: `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`, `f1_macro`, `rmse`,
 `rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`.

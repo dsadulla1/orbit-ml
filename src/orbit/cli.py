@@ -1,0 +1,162 @@
+"""orbit command line interface."""
+import time
+from pathlib import Path
+
+import pandas as pd
+import typer
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+
+from . import report as report_mod
+from .agent import Agent, Journal, SearchConfig
+from .config import LLMSettings, SandboxSettings, load_dotenv, tracker_choice
+from .task import Task, TaskSpec, prepare, profile
+
+app = typer.Typer(help="Autonomous ML experiments: an LLM proposes, a sandbox runs, orbit scores.",
+                  no_args_is_help=True, add_completion=False)
+console = Console()
+
+
+@app.callback()
+def _main():
+    load_dotenv()
+
+
+def _llm():
+    from .llm import OpenAICompatLLM
+    settings = LLMSettings()
+    if not settings.base_url and not settings.api_key:
+        raise typer.BadParameter(
+            "No LLM configured. Set OPENAI_API_KEY, or ORBIT_LLM_BASE_URL for a local "
+            "OpenAI-compatible server (see .env.example).")
+    return OpenAICompatLLM(settings)
+
+
+@app.command()
+def explore(data: Path = typer.Argument(..., exists=True, help="CSV file"),
+            target: str = typer.Option(..., "--target", "-t")):
+    """Print the dataset profile the agent will see."""
+    console.print(profile(pd.read_csv(data), target))
+
+
+@app.command()
+def run(
+    data: Path = typer.Argument(..., exists=True, help="CSV file with features and the target"),
+    target: str = typer.Option(..., "--target", "-t", help="Column to predict"),
+    metric: str = typer.Option(None, "--metric", "-m",
+                               help="roc_auc, log_loss, accuracy, f1_macro, rmse, mae, r2 "
+                                    "(default: inferred)"),
+    goal: str = typer.Option(None, help="Free-text goal or constraints for the agent"),
+    steps: int = typer.Option(20, help="Maximum number of experiments"),
+    minutes: float = typer.Option(60, help="Time budget for the whole search"),
+    tokens: int = typer.Option(None, help="Optional LLM token budget"),
+    drafts: int = typer.Option(3, help="Independent initial solutions before refining"),
+    timeout: int = typer.Option(None, help="Per-experiment time limit in seconds"),
+    tracker: str = typer.Option("auto", help="auto | mlflow | wandb | none"),
+    out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
+    seed: int = typer.Option(42),
+):
+    """Run an autonomous experiment search on a CSV dataset."""
+    from .sandbox import DockerSandbox, check_docker
+    from .tracking import make_tracker
+
+    sb_settings = SandboxSettings()
+    ok, msg = check_docker(sb_settings)
+    if not ok:
+        console.print(f"[red]Sandbox unavailable:[/] {msg}")
+        raise typer.Exit(1)
+    llm = _llm()
+
+    run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{data.stem}"
+    task = prepare(TaskSpec(str(data), target, metric, goal, seed=seed), run_dir)
+    cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
+                       n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
+                       cpus=sb_settings.cpus, seed=seed)
+    trk = make_tracker(tracker_choice(tracker))
+    trk.start(task, cfg, llm.model)
+
+    console.print(f"[bold]orbit[/] {run_dir}  model={llm.model}  metric={task.metric_name}  "
+                  f"baseline={task.baseline:.4f}  tracker={trk.name}")
+
+    def on_node(node, agent):
+        best = agent.best()
+        status = (f"[green]{node.metric:.4f}[/]" if not node.buggy else
+                  f"[red]failed[/] {_last_line(node.error)}")
+        star = " [yellow]* new best[/]" if best and best.id == node.id else ""
+        console.print(f"  #{node.id:<3} {node.stage:<8} {status}{star}  "
+                      f"[dim]{node.duration:.0f}s | {_short(node.plan, 90)}[/]")
+
+    agent = Agent(task, llm, DockerSandbox(sb_settings), cfg, tracker=trk, on_node=on_node)
+    journal = agent.run()
+    _write_report(task, journal, llm, trk)
+
+
+def _short(text, limit=70):
+    return " ".join((text or "").split())[:limit]
+
+
+def _last_line(text, limit=70):
+    """Errors are most informative at the end (the exception message)."""
+    lines = [l for l in (text or "").strip().splitlines() if l.strip()]
+    return _short(lines[-1] if lines else "", limit)
+
+
+def _write_report(task: Task, journal: Journal, llm, trk=None):
+    md, _ = report_mod.build(task, journal, llm)
+    path = task.run_dir / "report.md"
+    path.write_text(md, encoding="utf-8")
+    if trk:
+        trk.log_report(path)
+    console.print()
+    console.print(Markdown(md))
+    console.print(f"\n[dim]Report written to {path}[/]")
+
+
+@app.command()
+def compare(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)):
+    """Show every experiment of a run, best first."""
+    task, journal = Task.load(run_dir), Journal.load(run_dir / "journal.json")
+    table = Table(title=f"{run_dir.name} ({task.metric_name}, baseline {task.baseline:.4f})")
+    for col in ("#", "stage", "parent", "val", "test", "secs", "approach / error"):
+        table.add_column(col, overflow="fold")
+    ranked = journal.ranked(task.metric)
+    order = ranked + [n for n in journal.nodes if n.buggy]
+    for n in order:
+        table.add_row(
+            str(n.id), n.stage, str(n.parent or ""),
+            f"{n.metric:.4f}" if n.metric is not None else "-",
+            f"{n.test_metric:.4f}" if n.test_metric is not None else "",
+            f"{n.duration:.0f}",
+            n.plan[:120] if not n.buggy else f"[red]{_last_line(n.error, 120)}[/]",
+        )
+    console.print(table)
+
+
+@app.command()
+def summarize(run_dir: Path = typer.Argument(..., exists=True, file_okay=False),
+              no_llm: bool = typer.Option(False, "--no-llm", help="Deterministic template only")):
+    """(Re)write the run's report.md with a data-checked narrative."""
+    task, journal = Task.load(run_dir), Journal.load(run_dir / "journal.json")
+    _write_report(task, journal, None if no_llm else _llm())
+
+
+@app.command()
+def doctor():
+    """Check the LLM endpoint, Docker sandbox and tracker configuration."""
+    from .sandbox import check_docker
+
+    s = LLMSettings()
+    console.print(f"LLM: model={s.model} base_url={s.base_url or 'https://api.openai.com/v1'}")
+    try:
+        reply = _llm().complete("Reply with the single word: pong", "ping")
+        console.print(f"  [green]ok[/] replied {reply.text[:40]!r}")
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [red]failed[/] {type(e).__name__}: {str(e)[:200]}")
+    ok, msg = check_docker()
+    console.print(f"Sandbox: [{'green' if ok else 'red'}]{'ok' if ok else 'failed'}[/] {msg}")
+    console.print(f"Tracker (auto): {tracker_choice('auto')}")
+
+
+if __name__ == "__main__":
+    app()

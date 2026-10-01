@@ -202,6 +202,15 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         raise ValueError("folds must be at least 1.")
     n_folds = spec.folds or (AUTO_FOLDS if len(df) * (1 - spec.test_size) <= AUTO_CV_MAX_ROWS else 1)
 
+    if n_folds > 1 and kind == "classification":
+        # Stratified folds need every class in every fold; the test split takes its share first.
+        usable = int(int(y.astype(str).value_counts().min()) * (1 - spec.test_size))
+        if usable < n_folds:
+            reduced = usable if usable >= 2 else 1
+            spec.notes.append(f"folds reduced from {n_folds} to {reduced}: the rarest class has "
+                              f"only {int(y.astype(str).value_counts().min())} rows")
+            n_folds = reduced
+
     (run_dir / "input").mkdir(parents=True, exist_ok=True)
     (run_dir / "hidden").mkdir(parents=True, exist_ok=True)
     features = [c for c in df.columns if c != spec.target]
@@ -226,6 +235,13 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
             val_rows.append(dev.iloc[va_idx].assign(_fold=k))
         profile_df = dev
 
+    if metric.needs_proba:
+        for _, val_k, _ in parts:
+            if val_k[spec.target].astype(str).nunique() < 2:
+                raise ValueError(
+                    f"{metric_name} needs both classes in every validation fold, but there are too few "
+                    f"rows of the rarer class ({int(y.astype(str).value_counts().min())}) to split; "
+                    "use --metric accuracy or balanced_accuracy, or provide more data.")
     hidden = pd.concat([pd.concat(val_rows).assign(_split="val"), test_rows.assign(_split="test")])
     hidden = hidden.sample(frac=1.0, random_state=spec.seed).reset_index(drop=True)
     hidden[ID_COL] = rng.permutation(len(hidden)) + 1
@@ -248,10 +264,14 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
             out / "test.csv", index=False)
         baselines.append(_baseline(metric, train_k[spec.target], val_k[spec.target], positive_label))
 
+    baseline = float(np.mean(baselines))
+    if not np.isfinite(baseline):
+        raise ValueError(f"The baseline {metric_name} score is not finite; the target may be constant "
+                         "in a validation fold. Check the target column.")
     task = Task(
         spec=spec, run_dir=run_dir, kind=kind, metric_name=metric_name,
         positive_label=positive_label, classes=classes, n_train=len(parts[0][0]),
-        profile=profile(profile_df, spec.target), baseline=float(np.mean(baselines)),
+        profile=profile(profile_df, spec.target), baseline=baseline,
         n_folds=n_folds,
         extra_profile="\n\n".join(describe_table(Path(n), f, title=f"data/extra/{n}.csv") for n, f in extras.items()),
         docs_text=read_docs([Path(p) for p in spec.docs]),

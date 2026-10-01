@@ -109,18 +109,18 @@ def _parse_json(text: str) -> dict:
 def _check(proposal: dict, frames: dict[str, pd.DataFrame], target, metric, eval_text) -> dict:
     """Validate an LLM proposal against the real tables; raises PlanError with a fixable message."""
     primary = proposal.get("primary_table")
-    if primary not in frames:
-        raise PlanError(f"primary_table {primary!r} is not one of {sorted(frames)}")
+    if not isinstance(primary, str) or primary not in frames:
+        raise PlanError(f"primary_table {primary!r} must be one of {sorted(frames)}")
     tgt = target or proposal.get("target")
-    if tgt not in frames[primary].columns:
-        raise PlanError(f"target {tgt!r} is not a column of {primary}: {list(frames[primary].columns)[:30]}")
+    if not isinstance(tgt, str) or tgt not in frames[primary].columns:
+        raise PlanError(f"target {tgt!r} must be a column name of {primary}: {list(frames[primary].columns)[:30]}")
     name = metric
     if name is None:
         name = proposal.get("metric")
-        if name is not None and name not in METRICS:
+        if name is not None and (not isinstance(name, str) or name not in METRICS):
             raise PlanError(f"metric {name!r} is not supported; choose from {sorted(METRICS)} or null")
     ident = proposal.get("id_column")
-    if ident is not None and ident not in frames[primary].columns:
+    if not isinstance(ident, str) or ident not in frames[primary].columns or ident == tgt:
         ident = None
     return {"primary": primary, "target": tgt, "metric": name, "id_column": ident,
             "reasoning": str(proposal.get("reasoning") or "")[:300]}

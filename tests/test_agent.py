@@ -123,3 +123,12 @@ def test_cross_validation_rejects_bad_rows_in_any_fold(clf_csv, tmp_path):
     agent, _ = _agent(tmp_path, clf_csv, [BAD_OUTPUT], folds=3, max_steps=1, n_drafts=1)
     node = agent.run().nodes[0]
     assert node.buggy and "fold 1/3" in node.error and "orbit_id" in node.error
+
+
+def test_non_finite_scores_count_as_failures(clf_csv, tmp_path, monkeypatch):
+    agent, _ = _agent(tmp_path, clf_csv, [clf_reply()], folds=2, max_steps=1, n_drafts=1)
+    monkeypatch.setattr("orbit.agent.score", lambda *a, **k: float("nan"))
+    node = agent.run().nodes[0]
+    assert node.buggy and "not finite" in node.error and agent.journal.best_id is None
+    from orbit.agent import Node
+    assert Node(1, "draft", None, metric=float("nan")).buggy

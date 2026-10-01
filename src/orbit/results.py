@@ -6,6 +6,7 @@ one call without access to the run folder. The CLI table, the JSON export and th
 render this structure.
 """
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -36,11 +37,14 @@ def _tracker_link(run_dir: Path) -> dict | None:
     path = run_dir / "tracking.json"
     if not path.exists():
         return None
-    info = json.loads(path.read_text())
-    uri = info.get("uri", "")
-    if uri.startswith("http"):
-        info["url"] = f"{uri.rstrip('/')}/#/experiments/{info['experiment_id']}/runs/{info['run_id']}"
-    return info
+    try:
+        info = json.loads(path.read_text())
+        uri = info.get("uri", "")
+        if uri.startswith("http"):
+            info["url"] = f"{uri.rstrip('/')}/#/experiments/{info['experiment_id']}/runs/{info['run_id']}"
+        return info
+    except (ValueError, KeyError, AttributeError):
+        return None  # a damaged tracking.json only costs the link
 
 
 def collect(run_dir: Path) -> dict:
@@ -79,6 +83,8 @@ def collect_mlflow(run_id: str, client=None) -> dict:
     """The same experiment-level results, read from an MLflow server by parent run id."""
     import mlflow
 
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id or ""):
+        raise ValueError(f"{run_id!r} is not an MLflow run id")
     client = client or mlflow.MlflowClient()
     parent = client.get_run(run_id)
     children = client.search_runs([parent.info.experiment_id],
@@ -87,9 +93,11 @@ def collect_mlflow(run_id: str, client=None) -> dict:
     experiments = []
     for r in children:
         m, p, t = r.data.metrics, r.data.params, r.data.tags
-        folds = [v for _, v in sorted((k, v) for k, v in m.items() if k.startswith("val_score_fold_"))]
+        folds = [v for _, v in sorted((int(k.rsplit("_", 1)[1]), v) for k, v in m.items()
+                                      if k.startswith("val_score_fold_"))]
+        found = re.match(r"exp-(\d+)", r.info.run_name or "")
         experiments.append({
-            "id": int(r.info.run_name.split("-")[1]), "stage": p.get("stage"),
+            "id": int(found.group(1)) if found else 0, "stage": p.get("stage"),
             "parent": int(p["parent"]) if p.get("parent") else None, "plan": t.get("orbit.plan", ""),
             "status": t.get("orbit.status"), "val_score": m.get("val_score"),
             "val_std": m.get("val_score_std"), "fold_scores": folds, "test_score": None,

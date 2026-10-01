@@ -92,3 +92,13 @@ def test_collect_from_mlflow_matches_the_run_folder(clf_csv, tmp_path, monkeypat
         assert remote["task"]["folds"] == 3 and local["tracker"]["run_id"] == info["run_id"]
     finally:
         mlflow.set_tracking_uri(None)
+
+
+def test_damaged_tracking_file_and_bad_run_ids(clf_csv, tmp_path):
+    task, _ = _run(tmp_path, clf_csv)
+    (task.run_dir / "tracking.json").write_text("{not json")
+    assert results.collect(task.run_dir)["tracker"] is None
+    (task.run_dir / "tracking.json").write_text('{"uri": "http://x"}')  # missing ids
+    assert results.collect(task.run_dir)["tracker"] is None
+    with pytest.raises(ValueError, match="not an MLflow run id"):
+        results.collect_mlflow("abc' OR tags.x = '1")

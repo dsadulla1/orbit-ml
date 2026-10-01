@@ -7,6 +7,7 @@ Every node is one experiment (a script + its official score). Each step picks on
 """
 import json
 import logging
+import math
 import random
 import time
 from dataclasses import asdict, dataclass, field
@@ -57,7 +58,7 @@ class Node:
 
     @property
     def buggy(self) -> bool:
-        return self.metric is None
+        return self.metric is None or not math.isfinite(self.metric)
 
 
 @dataclass
@@ -204,7 +205,10 @@ class Agent:
             preds = read_predictions(fwork / "predictions.csv", self.task.fold_ids(fold))
             # Check test rows too, so the final test scoring cannot fail on them.
             check_values(self.task.metric, preds, self.task.positive_label)
-            return None, score(self.task.metric, val, preds.loc[val.index], self.task.positive_label)
+            value = score(self.task.metric, val, preds.loc[val.index], self.task.positive_label)
+            if not math.isfinite(value):
+                return f"The {self.task.metric_name} score on this fold is not finite ({value}).", None
+            return None, value
         except InvalidPredictions as e:
             return f"Script ran but its output was rejected: {e}", None
 

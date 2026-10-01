@@ -109,9 +109,9 @@ def test_folds_default_depends_on_size(clf_csv, tmp_path):
 
 def test_too_few_rows_for_folds(tmp_path):
     path = tmp_path / "tiny.csv"
-    pd.DataFrame({"x": range(12), "label": [0, 1] * 6}).to_csv(path, index=False)
+    pd.DataFrame({"x": range(12), "price": [i * 1.5 for i in range(12)]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="cross-validation"):
-        prepare(TaskSpec(str(path), "label", folds=10), tmp_path / "run")
+        prepare(TaskSpec(str(path), "price", folds=10), tmp_path / "run")
 
 
 def test_extra_tables_docs_and_id_column_reach_the_sandbox_and_prompt(clf_csv, tmp_path):
@@ -139,3 +139,19 @@ def test_tab_separated_primary_table(tmp_path):
     path = tmp_path / "t.tsv"
     pd.DataFrame({"x": range(60), "label": ["a", "b"] * 30}).to_csv(path, sep="\t", index=False)
     assert prepare(TaskSpec(str(path), "label", folds=1), tmp_path / "run").kind == "classification"
+
+
+def test_rare_class_reduces_folds_or_is_rejected(tmp_path):
+    def data(positives, name):
+        path = tmp_path / f"{name}.csv"
+        pd.DataFrame({"x": range(60), "y": [1] * positives + [0] * (60 - positives)}).to_csv(path, index=False)
+        return str(path)
+
+    task = prepare(TaskSpec(data(3, "a"), "y"), tmp_path / "a")
+    assert task.n_folds == 2 and any("folds reduced from 5 to 2" in n for n in task.spec.notes)
+    assert task.baseline == task.baseline  # finite, not NaN
+    assert prepare(TaskSpec(data(2, "b"), "y"), tmp_path / "b").n_folds == 1
+    assert prepare(TaskSpec(data(8, "c"), "y"), tmp_path / "c").n_folds == 5
+    with pytest.raises(ValueError, match="both classes in every validation fold"):
+        prepare(TaskSpec(data(1, "d"), "y"), tmp_path / "d")  # roc_auc cannot be scored on one positive
+    assert prepare(TaskSpec(data(1, "e"), "y", metric="accuracy"), tmp_path / "e").baseline > 0.9

@@ -25,3 +25,12 @@ def test_model_text_is_not_rich_markup():
 
     assert _short("fix [red]this[/red] [bt] now") == r"fix \[red]this\[/red] \[bt] now"
     assert _last_line("Traceback\n  [bt] (8) libfoo.so\nValueError: [/x] bad").startswith("ValueError: \\[/x]")
+
+
+def test_markup_in_names_does_not_crash_the_terminal_output(tmp_path):
+    import pandas as pd
+
+    path = tmp_path / "[bold].csv"
+    pd.DataFrame({"[/odd]": range(10), "label": [0, 1] * 5}).to_csv(path, index=False)
+    result = runner.invoke(app, ["explore", str(path), "-t", "label"])
+    assert result.exit_code == 0 and "[/odd]" in result.output

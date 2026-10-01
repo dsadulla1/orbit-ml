@@ -94,3 +94,15 @@ def test_extra_table_with_the_target_is_never_exposed(tmp_path):
     p = plan(sorted(tmp_path.glob("*.csv")), [], target="y")
     assert [e.name for e in p.extras] == ["side.csv"]
     assert sum("contains the target column" in n for n in p.notes) == 2
+
+
+@pytest.mark.parametrize("bad", [{"primary_table": ["train.csv"]}, {"target": ["SalePrice"]},
+                                 {"metric": ["rmse"]}, {"primary_table": 7}])
+def test_non_string_fields_are_retried_not_crashed(house, bad):
+    llm = ScriptedLLM([_j(**bad), _j()])
+    assert plan(house["tables"], [], goal="price", llm=llm).target == "SalePrice"
+    assert "rejected" in llm.prompts[1]
+
+
+def test_id_column_equal_to_target_is_dropped(house):
+    assert plan(house["tables"], [], goal="price", llm=ScriptedLLM([_j(id_column="SalePrice")])).id_column is None

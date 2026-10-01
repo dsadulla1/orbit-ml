@@ -43,7 +43,7 @@ def explore(data: Path = typer.Argument(..., exists=True, help="CSV file"),
     if target not in df.columns:
         raise typer.BadParameter(f"{target!r} not found. Columns: {list(df.columns)}",
                                  param_hint="--target")
-    console.print(profile(df, target))
+    console.print(escape(profile(df, target)))
 
 
 @app.command()
@@ -87,7 +87,7 @@ def run(
     sb_settings = SandboxSettings()
     ok, msg = check_docker(sb_settings)
     if not ok:
-        console.print(f"[red]Sandbox unavailable:[/] {msg}")
+        console.print(f"[red]Sandbox unavailable:[/] {escape(msg)}")
         raise typer.Exit(1)
     llm = _llm()
 
@@ -105,11 +105,11 @@ def run(
     trk.start(task, cfg, llm.model)
 
     scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
-    console.print(f"[bold]orbit[/] {run_dir}  model={llm.model}  tracker={trk.name}")
-    console.print(f"  data: {Path(task.spec.data_path).name}, target={task.spec.target}, "
+    console.print(f"[bold]orbit[/] {escape(str(run_dir))}  model={escape(llm.model)}  tracker={trk.name}")
+    console.print(f"  data: {escape(Path(task.spec.data_path).name)}, target={escape(task.spec.target)}, "
                   f"metric={task.metric_name}, baseline={task.baseline:.4f}, validation={scheme}")
     if task.spec.extras:
-        console.print(f"  extra tables: {', '.join(Path(p).name for p in task.spec.extras)}")
+        console.print(f"  extra tables: {escape(', '.join(Path(p).name for p in task.spec.extras))}")
     for note in task.spec.notes:
         console.print(f"  [dim]{escape(note)}[/]")
 
@@ -147,7 +147,8 @@ def _write_report(task: Task, journal: Journal, llm, trk=None):
             trk.log_report(html_path)
     console.print()
     console.print(Markdown(md))
-    console.print(f"\n[dim]Report written to {path}" + (f" and {html_path}" if html_path else "") + "[/]")
+    console.print(f"\n[dim]Report written to {escape(str(path))}"
+                  + (f" and {escape(str(html_path))}" if html_path else "") + "[/]")
 
 
 def _write_html(run_dir: Path, path: Path | None = None) -> Path | None:
@@ -159,7 +160,7 @@ def _write_html(run_dir: Path, path: Path | None = None) -> Path | None:
         path.write_text(html_report.render(results.collect(run_dir)), encoding="utf-8")
         return path
     except Exception as e:  # noqa: BLE001
-        console.print(f"[yellow]Could not write the HTML report: {type(e).__name__}: {e}[/]")
+        console.print(f"[yellow]Could not write the HTML report: {type(e).__name__}: {escape(str(e))}[/]")
         return None
 
 
@@ -211,7 +212,7 @@ def results(
     if html:
         out = _write_html(run_dir, html)
         if out:
-            console.print(f"HTML report written to {out}")
+            console.print(f"HTML report written to {escape(str(out))}")
         return
     data = results_mod.collect(run_dir)
     if json_out:
@@ -219,7 +220,7 @@ def results(
         return
     s, task, prob = data["summary"], data["task"], data["problem"]
     console.print(f"[bold]{escape(prob['goal'] or 'Predict ' + prob['target'])}[/]")
-    console.print(f"[dim]{prob['primary_table']}, target {prob['target']}, {task['metric']} "
+    console.print(f"[dim]{escape(prob['primary_table'])}, target {escape(prob['target'])}, {task['metric']} "
                   f"({task['validation']}), baseline {task['baseline']:.4f}[/]")
     best = s.get("best")
     if best:
@@ -237,9 +238,9 @@ def results(
                       f"{e['test_score']:.4f}" if e["test_score"] is not None else "",
                       escape(e["plan"][:110]) if ok else f"[red]{escape(e['error'][:110])}[/]")
     console.print(table)
-    console.print(f"[dim]Report: {run_dir / 'report.md'}  |  {run_dir / 'report.html'}[/]")
+    console.print(f"[dim]Report: {escape(str(run_dir / 'report.md'))}  |  {escape(str(run_dir / 'report.html'))}[/]")
     if data["tracker"] and data["tracker"].get("url"):
-        console.print(f"[dim]MLflow: {data['tracker']['url']}[/]")
+        console.print(f"[dim]MLflow: {escape(data['tracker']['url'])}[/]")
 
 
 @app.command()
@@ -256,14 +257,14 @@ def doctor():
     from .sandbox import check_docker
 
     s = LLMSettings()
-    console.print(f"LLM: model={s.model} base_url={s.base_url or 'https://api.openai.com/v1'}")
+    console.print(escape(f"LLM: model={s.model} base_url={s.base_url or 'https://api.openai.com/v1'}"))
     try:
         reply = _llm().complete("Reply with the single word: pong", "ping")
-        console.print(f"  [green]ok[/] replied {reply.text[:40]!r}")
+        console.print(f"  [green]ok[/] replied {escape(repr(reply.text[:40]))}")
     except Exception as e:  # noqa: BLE001
-        console.print(f"  [red]failed[/] {type(e).__name__}: {str(e)[:200]}")
+        console.print(f"  [red]failed[/] {type(e).__name__}: {escape(str(e)[:200])}")
     ok, msg = check_docker()
-    console.print(f"Sandbox: [{'green' if ok else 'red'}]{'ok' if ok else 'failed'}[/] {msg}")
+    console.print(f"Sandbox: [{'green' if ok else 'red'}]{'ok' if ok else 'failed'}[/] {escape(msg)}")
     tracker = tracker_choice("auto")
     console.print(f"Tracker (auto): {tracker}")
     if tracker == "mlflow":
@@ -276,12 +277,12 @@ def _check_mlflow() -> str:
 
     uri = os.environ.get("MLFLOW_TRACKING_URI", "")
     if not uri.startswith("http"):
-        return f"[green]ok[/] local store ({uri or 'MLflow default'})"
+        return f"[green]ok[/] local store ({escape(uri or 'MLflow default')})"
     try:
         urllib.request.urlopen(uri.rstrip("/") + "/health", timeout=5)
-        return f"[green]ok[/] server reachable at {uri}"
+        return f"[green]ok[/] server reachable at {escape(uri)}"
     except Exception as e:  # noqa: BLE001
-        return f"[red]failed[/] {uri}: {e} (start it: docker compose --env-file .env -f docker/compose.yaml up -d mlflow)"
+        return f"[red]failed[/] {escape(uri)}: {escape(str(e))} (start it: docker compose --env-file .env -f docker/compose.yaml up -d mlflow)"
 
 
 if __name__ == "__main__":

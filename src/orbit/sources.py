@@ -70,15 +70,16 @@ def download(url: str, dest_dir: Path, max_bytes: int = MAX_DOWNLOAD_BYTES, time
     except Exception as e:  # noqa: BLE001 - network, DNS, HTTP status: all reported the same way
         raise SourceError(f"could not download {url}: {e}") from e
     with resp:
-        name = Path(urllib.parse.unquote(urllib.parse.urlparse(resp.geturl()).path)).name or "download"
+        raw = urllib.parse.unquote(urllib.parse.urlparse(resp.geturl()).path).replace("\x00", "")
+        name = Path(raw).name or "download"
         if _kind(Path(name)) is None:
             ctype = resp.headers.get_content_type()
             if ctype not in _CONTENT_TYPES:
                 raise SourceError(f"{url}: unsupported file type {name!r} ({ctype}); "
                                   "expected CSV, TSV, gzip, zip or a text document")
             name += _CONTENT_TYPES[ctype]
-        length = resp.headers.get("Content-Length")
-        if length and int(length) > max_bytes:
+        length = resp.headers.get("Content-Length", "")
+        if length.isdigit() and int(length) > max_bytes:
             raise SourceError(f"{url} is {int(length) / 1e6:.0f} MB; the limit is {max_bytes / 1e6:.0f} MB")
         dest_dir.mkdir(parents=True, exist_ok=True)
         path = dest_dir / name

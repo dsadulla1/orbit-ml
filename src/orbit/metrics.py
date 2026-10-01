@@ -39,14 +39,6 @@ class InvalidPredictions(ValueError):
     """Raised with a message meant to be shown to the agent so it can fix its code."""
 
 
-def is_better(metric: Metric, a: float | None, b: float | None) -> bool:
-    if a is None:
-        return False
-    if b is None:
-        return True
-    return a > b if metric.greater_is_better else a < b
-
-
 def read_predictions(path, expected_ids: pd.Index) -> pd.Series:
     if not path.exists():
         raise InvalidPredictions("predictions.csv was not written to the working directory.")

@@ -6,6 +6,7 @@ import pandas as pd
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.table import Table
 
 from . import report as report_mod
@@ -95,7 +96,7 @@ def run(
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
                           seed=seed, llm=llm)
     except (SourceError, PlanError, ValueError) as e:
-        console.print(f"[red]Could not set up the task:[/] {e}")
+        console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)
     cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
                        n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
@@ -110,7 +111,7 @@ def run(
     if task.spec.extras:
         console.print(f"  extra tables: {', '.join(Path(p).name for p in task.spec.extras)}")
     for note in task.spec.notes:
-        console.print(f"  [dim]{note}[/]")
+        console.print(f"  [dim]{escape(note)}[/]")
 
     def on_node(node, agent):
         best = agent.best()
@@ -126,24 +127,40 @@ def run(
 
 
 def _short(text, limit=70):
-    return " ".join((text or "").split())[:limit]
+    return escape(" ".join((text or "").split())[:limit])  # model text must not act as Rich markup
 
 
 def _last_line(text, limit=70):
     """Errors are most informative at the end (the exception message)."""
     lines = [l for l in (text or "").strip().splitlines() if l.strip()]
-    return _short(lines[-1] if lines else "", limit)
+    return _short(lines[-1] if lines else "", limit)  # already escaped by _short
 
 
 def _write_report(task: Task, journal: Journal, llm, trk=None):
     md, _ = report_mod.build(task, journal, llm)
     path = task.run_dir / "report.md"
     path.write_text(md, encoding="utf-8")
+    html_path = _write_html(task.run_dir)
     if trk:
         trk.log_report(path)
+        if html_path:
+            trk.log_report(html_path)
     console.print()
     console.print(Markdown(md))
-    console.print(f"\n[dim]Report written to {path}[/]")
+    console.print(f"\n[dim]Report written to {path}" + (f" and {html_path}" if html_path else "") + "[/]")
+
+
+def _write_html(run_dir: Path, path: Path | None = None) -> Path | None:
+    """The standalone HTML report; a failure here never costs the run its results."""
+    from . import html_report, results
+
+    try:
+        path = path or run_dir / "report.html"
+        path.write_text(html_report.render(results.collect(run_dir)), encoding="utf-8")
+        return path
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[yellow]Could not write the HTML report: {type(e).__name__}: {e}[/]")
+        return None
 
 
 @app.command()
@@ -161,9 +178,68 @@ def compare(run_dir: Path = typer.Argument(..., exists=True, file_okay=False)):
             f"{n.metric:.4f}" if n.metric is not None else "-",
             f"{n.test_metric:.4f}" if n.test_metric is not None else "",
             f"{n.duration:.0f}",
-            n.plan[:120] if not n.buggy else f"[red]{_last_line(n.error, 120)}[/]",
+            escape(n.plan[:120]) if not n.buggy else f"[red]{_last_line(n.error, 120)}[/]",
         )
     console.print(table)
+
+
+@app.command()
+def results(
+    run_dir: Path = typer.Argument(None, exists=True, file_okay=False, help="A run folder"),
+    json_out: bool = typer.Option(False, "--json", help="Print everything about the run as JSON"),
+    html: Path = typer.Option(None, "--html", help="Write the standalone HTML report to this file"),
+    mlflow_run: str = typer.Option(None, "--mlflow", help="Fetch a run from the MLflow server by its "
+                                                           "parent run id and print it as JSON"),
+):
+    """Show a run's results: the best model, scores and every experiment.
+
+    Examples:
+      orbit results runs/20261001-120000-wine            # summary table
+      orbit results runs/20261001-120000-wine --json     # everything, for scripts
+      orbit results runs/20261001-120000-wine --html out.html
+      orbit results --mlflow 3f9a...                     # same data, straight from MLflow
+    """
+    import json as json_mod
+
+    from . import results as results_mod
+
+    if mlflow_run:
+        console.print_json(json_mod.dumps(results_mod.collect_mlflow(mlflow_run), default=str))
+        return
+    if run_dir is None:
+        raise typer.BadParameter("give a run folder (or --mlflow RUN_ID)")
+    if html:
+        out = _write_html(run_dir, html)
+        if out:
+            console.print(f"HTML report written to {out}")
+        return
+    data = results_mod.collect(run_dir)
+    if json_out:
+        console.print_json(json_mod.dumps(data, default=str))
+        return
+    s, task, prob = data["summary"], data["task"], data["problem"]
+    console.print(f"[bold]{escape(prob['goal'] or 'Predict ' + prob['target'])}[/]")
+    console.print(f"[dim]{prob['primary_table']}, target {prob['target']}, {task['metric']} "
+                  f"({task['validation']}), baseline {task['baseline']:.4f}[/]")
+    best = s.get("best")
+    if best:
+        std = f" ± {best['val_std_across_folds']}" if best.get("val_std_across_folds") else ""
+        console.print(f"Best: experiment #{best['experiment']}  validation {best['val_score']}{std}  "
+                      f"test {best['test_score']}  (gain over baseline {best['gain_over_baseline']})")
+    table = Table()
+    for col in ("#", "stage", "validation", "test", "approach / error"):
+        table.add_column(col, overflow="fold")
+    for e in sorted(data["experiments"], key=lambda e: (e["val_score"] is None,
+                    -(e["val_score"] or 0) if task["greater_is_better"] else (e["val_score"] or 0))):
+        ok = e["status"] == "ok"
+        score = f"{e['val_score']:.4f}" + (f" ± {e['val_std']:.3f}" if e["val_std"] else "") if ok else "-"
+        table.add_row(str(e["id"]), e["stage"], score,
+                      f"{e['test_score']:.4f}" if e["test_score"] is not None else "",
+                      escape(e["plan"][:110]) if ok else f"[red]{escape(e['error'][:110])}[/]")
+    console.print(table)
+    console.print(f"[dim]Report: {run_dir / 'report.md'}  |  {run_dir / 'report.html'}[/]")
+    if data["tracker"] and data["tracker"].get("url"):
+        console.print(f"[dim]MLflow: {data['tracker']['url']}[/]")
 
 
 @app.command()

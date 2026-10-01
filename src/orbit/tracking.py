@@ -10,6 +10,11 @@ from pathlib import Path
 
 log = logging.getLogger("orbit")
 
+MLFLOW_FAIL_FAST = {
+    "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "1",
+    "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR": "1",
+    "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
+}
 ARTIFACTS = ("solution.py", "prompt.md", "response.md", "stdout.txt", "stderr.txt")
 
 
@@ -36,6 +41,10 @@ class MLflowTracker:
 
     def __init__(self, experiment: str = "orbit"):
         os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")  # quiet import-time banner
+        # MLflow retries a dead server for about 4 minutes per call. Fail fast instead, so an
+        # unreachable tracker costs seconds per logged experiment, not minutes.
+        for key, value in MLFLOW_FAIL_FAST.items():
+            os.environ.setdefault(key, value)
         import mlflow
         self.mlflow = mlflow
         self.experiment = experiment

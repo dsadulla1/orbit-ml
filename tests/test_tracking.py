@@ -65,3 +65,15 @@ def test_mlflow_finish_closes_run_without_test_score(clf_csv, tmp_path, mlflow_u
     run = mlflow.MlflowClient().get_run(tracker.parent.info.run_id)
     assert run.info.status == "FINISHED" and run.data.tags["orbit.stop_reason"] == "done"
     assert mlflow.active_run() is None
+
+
+def test_mlflow_fails_fast_unless_configured(monkeypatch):
+    for key in ("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "MLFLOW_HTTP_REQUEST_TIMEOUT"):
+        monkeypatch.setenv(key, "x")  # registers the variable so teardown removes it again
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR", "5")  # explicit user setting wins
+    MLflowTracker()
+    import os
+    assert os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] == "1"
+    assert os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] == "15"
+    assert os.environ["MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR"] == "5"

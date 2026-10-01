@@ -32,6 +32,20 @@ Write at most 150 words of Markdown with exactly these bold labels, each followe
 **Caveats:** anything that weakens the conclusion.
 **Next steps:** two concrete recommendations."""
 
+REVISE_USER = """FACTS:
+```json
+{facts}
+```
+
+Your draft report:
+{draft}
+
+A reviewer found these problems with the draft:
+{issues}
+
+Rewrite the report so it is fully consistent with FACTS. Keep the same four bold labels, use only \
+numbers from FACTS, and stay under 150 words."""
+
 
 def _r(x, nd=4):
     return None if x is None else round(float(x), nd)
@@ -120,6 +134,41 @@ def check_numbers(text: str, fact_dict: dict) -> list[str]:
     return unverified
 
 
+_NUMWORDS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen twenty".split())}
+_C = r"(\d+|" + "|".join(_NUMWORDS) + r")"
+_CLAIM = re.compile(
+    rf"\b{_C}\s+(?:of\s+(?:the\s+)?{_C}\s+)?experiments?\s+(?:\w+\s+)?(succeeded|failed|crashed)\b"
+    rf"(?:\s+(?:out of|of)\s+(?:the\s+)?{_C}\b)?", re.IGNORECASE)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+_QUALIFIED = re.compile(r"debug|draft|improve|fix|first|best|runner|#\d|experiment \d", re.IGNORECASE)
+
+
+def _count(token: str) -> int:
+    return int(token) if token.isdigit() else _NUMWORDS[token.lower()]
+
+
+def check_claims(text: str, fact_dict: dict) -> list[str]:
+    """Counts of succeeded/failed experiments written in digits or words must match the run.
+    Digits are checked by `check_numbers`; this catches a right number with the wrong meaning
+    (e.g. "only one experiment succeeded out of ten" when one of ten failed)."""
+    run, failed = fact_dict["experiments_run"], fact_dict["experiments_failed"]
+    issues = []
+    for sentence in _SENTENCE.split(text):
+        if _QUALIFIED.search(sentence):
+            continue  # claims about a particular stage or experiment are not checked here
+        for m in _CLAIM.finditer(sentence):
+            n, total_a, verb, total_b = m.groups()
+            expected = failed if verb.lower() in ("failed", "crashed") else run - failed
+            if _count(n) != expected:
+                issues.append(f"claims {n} experiments {verb.lower()}, but {expected} of {run} did")
+            total = total_a or total_b
+            if total and _count(total) != run:
+                issues.append(f"claims {total} experiments in total, but {run} were run")
+    return issues
+
+
 def template_narrative(f: dict) -> str:
     if "best" not in f:
         return (f"**Verdict:** none of the {f['experiments_run']} experiments produced valid "
@@ -159,18 +208,41 @@ def leaderboard_md(f: dict) -> str:
     return "\n".join(rows)
 
 
+def review(narrative: str, f: dict) -> list[str]:
+    """Everything wrong with a narrative that can be checked against the facts."""
+    return [f"number {n} does not appear in FACTS" for n in check_numbers(narrative, f)] + \
+        check_claims(narrative, f)
+
+
+def _write(llm, f: dict) -> tuple[str, str, list[str]]:
+    """LLM narrative, reviewed against the facts, revised once, else the template.
+    Returns (text, source, problems found in earlier drafts)."""
+    facts_json = json.dumps(f, indent=2)
+    text = llm.complete(NARRATOR_SYSTEM, NARRATOR_USER.format(facts=facts_json)).text.strip()
+    source, found = f"LLM ({llm.model})", review(text, f)
+    if not found:
+        return text, source, []
+    revised = llm.complete(NARRATOR_SYSTEM, REVISE_USER.format(
+        facts=facts_json, draft=text, issues="\n".join(f"- {p}" for p in found))).text.strip()
+    again = review(revised, f)
+    if not again:
+        return revised, source + ", revised after review", found
+    return template_narrative(f), "template (the LLM narrative failed review twice)", found + again
+
+
 def build(task: Task, journal: Journal, llm=None) -> tuple[str, dict]:
     f = facts(task, journal)
-    source, narrative, unverified = "template", template_narrative(f), []
+    source, narrative, found = "template", template_narrative(f), []
     if llm is not None and "best" in f:
         try:
-            reply = llm.complete(NARRATOR_SYSTEM, NARRATOR_USER.format(facts=json.dumps(f, indent=2)))
-            narrative, source = reply.text.strip(), f"LLM ({llm.model})"
-            unverified = check_numbers(narrative, f)
+            narrative, source, found = _write(llm, f)
         except Exception as e:  # noqa: BLE001
             source = f"template (LLM failed: {type(e).__name__})"
+    unverified = review(narrative, f)
     check = ("All numbers verified against run data." if not unverified else
-             f"WARNING: unverified numbers in narrative: {', '.join(unverified)}")
+             f"WARNING: unverified statements in narrative: {'; '.join(unverified)}")
+    if found and not unverified:
+        check += f" Review caught {len(found)} problem(s) in a draft."
     best = f.get("best")
     md = [f"# orbit report: {task.run_dir.name}", "",
           f"Dataset `{f['dataset']}`, target `{f['target']}`, metric **{f['metric']}** "
@@ -184,4 +256,5 @@ def build(task: Task, journal: Journal, llm=None) -> tuple[str, dict]:
            f"{f['debug_fixes']}/{f['debug_attempts']} debug attempts succeeded)",
            f"- Wall time: {f['minutes']} min, LLM tokens: {f['total_tokens']:,}", ""]
     f["narrative_unverified"] = unverified
+    f["review_issues"] = found
     return "\n".join(md), f

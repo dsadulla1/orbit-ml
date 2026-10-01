@@ -6,7 +6,7 @@ import pytest
 from orbit.agent import Agent, SearchConfig
 from orbit.config import SandboxSettings
 from orbit.llm import Completion
-from orbit.report import build, check_numbers, facts
+from orbit.report import build, check_claims, check_numbers, facts
 from orbit.sandbox import DockerSandbox
 from orbit.task import TaskSpec, prepare
 
@@ -43,16 +43,53 @@ def test_cross_validated_report_shows_spread(clf_csv, tmp_path):
     assert "3-fold cross-validation" in md and " ± " in md and "All numbers verified" in md
 
 
-def test_llm_narrative_flags_invented_numbers(clf_csv, tmp_path):
+class _Scripted:
+    model = "scripted"
+
+    def __init__(self, *texts):
+        self.texts, self.prompts = list(texts), []
+
+    def complete(self, system, user):
+        self.prompts.append(user)
+        return Completion(self.texts.pop(0))
+
+
+GOOD = ("**Verdict:** experiment #1 won. **Evidence:** it ran across 2 experiments. "
+        "**Caveats:** none. **Next steps:** try more.")
+
+
+def test_review_revises_a_narrative_with_invented_numbers(clf_csv, tmp_path):
     task, journal = _finished_run(tmp_path, clf_csv)
+    llm = _Scripted("**Verdict:** experiment #1 reached 0.9999 AUC.", GOOD)
+    md, f = build(task, journal, llm=llm)
+    assert "revised after review" in md and "Review caught 1 problem" in md
+    assert "0.9999" not in md and "0.9999" in f["review_issues"][0] and f["narrative_unverified"] == []
+    assert "0.9999" in llm.prompts[1] and "reviewer found" in llm.prompts[1]
 
-    class Liar:
-        model = "liar"
-        def complete(self, system, user):
-            return Completion("**Verdict:** experiment #1 reached 0.9999 AUC.")
 
-    md, f = build(task, journal, llm=Liar())
-    assert "WARNING: unverified numbers" in md and "0.9999" in f["narrative_unverified"]
+def test_review_falls_back_to_the_template_when_revision_fails(clf_csv, tmp_path):
+    task, journal = _finished_run(tmp_path, clf_csv)
+    md, f = build(task, journal, llm=_Scripted("It scored 0.9999.", "It scored 0.8888."))
+    assert "failed review twice" in md and "**Verdict:** experiment #" in md
+    assert "0.9999" not in md and "0.8888" not in md and f["narrative_unverified"] == []
+
+
+def test_review_catches_wrong_success_and_failure_counts(clf_csv, tmp_path):
+    task, journal = _finished_run(tmp_path, clf_csv)
+    wrong = "**Caveats:** Only one experiment succeeded out of two."  # both ran fine
+    md, f = build(task, journal, llm=_Scripted("**Verdict:** experiment #1 won. " + wrong, GOOD))
+    assert "revised after review" in md and "succeeded" in f["review_issues"][0]
+
+
+def test_check_claims():
+    f = {"experiments_run": 10, "experiments_failed": 1}
+    assert check_claims("Only one experiment succeeded out of ten.", f) != []
+    assert check_claims("Nine experiments succeeded out of ten.", f) == []
+    assert check_claims("Only 1 experiment failed.", f) == []
+    assert check_claims("2 of the 10 experiments failed.", f) != []
+    assert check_claims("Three experiments failed entirely.", f) != []
+    assert check_claims("Experiment 3 failed and one debug experiment succeeded.", f) == []
+    assert check_claims("Nine experiments succeeded out of 12.", f) != []
 
 
 def test_docker_command_is_locked_down():

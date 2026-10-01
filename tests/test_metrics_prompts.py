@@ -1,7 +1,8 @@
 import pandas as pd
 import pytest
 
-from orbit.metrics import METRICS, InvalidPredictions, combine_predictions, read_predictions, score
+from orbit.metrics import (METRICS, InvalidPredictions, combine_predictions, match_metric,
+                          read_predictions, score)
 from orbit.prompts import SYSTEM, parse_response
 
 
@@ -85,3 +86,25 @@ def test_combine_fold_predictions():
     assert combine_predictions(METRICS["rmse"], [a]).tolist() == [0.2, 0.8]
     labels = [pd.Series(x, index=[1, 2]) for x in (["a", "b"], ["a", "a"], ["b", "b"])]
     assert combine_predictions(METRICS["accuracy"], labels).tolist() == ["a", "b"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("RMSE between log-prices", "rmsle"), ("root mean squared log error", "rmsle"),
+    ("RMSE", "rmse"), ("Root Mean Squared Error", "rmse"), ("mean absolute error", "mae"),
+    ("ROC AUC", "roc_auc"), ("area under the roc curve", "roc_auc"), ("log loss", "log_loss"),
+    ("PR-AUC", "pr_auc"), ("macro F1", "f1_macro"), ("balanced accuracy", "balanced_accuracy"),
+    ("accuracy", "accuracy"), ("R^2", "r2"), ("f1_macro", "f1_macro"),
+    ("how happy customers are", None), ("", None), (None, None)])
+def test_match_metric(text, expected):
+    assert match_metric(text) == expected
+
+
+def test_rmsle_and_new_classification_metrics():
+    y = pd.Series([100.0, 200.0, 400.0])
+    assert score(METRICS["rmsle"], y, y) == 0.0
+    assert score(METRICS["rmsle"], y, y * 2) > 0.6
+    with pytest.raises(InvalidPredictions, match=">= 0"):
+        score(METRICS["rmsle"], y, pd.Series([-1.0, 1.0, 1.0]))
+    yc = pd.Series(["a", "a", "a", "b"])
+    assert score(METRICS["balanced_accuracy"], yc, pd.Series(["a"] * 4)) == 0.5
+    assert score(METRICS["pr_auc"], yc, pd.Series([0.1, 0.2, 0.3, 0.9]), positive_label="b") == 1.0

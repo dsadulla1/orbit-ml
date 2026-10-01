@@ -181,6 +181,8 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         kind, classes = "regression", []
     if metric.kind != kind:
         raise ValueError(f"Metric {metric_name!r} is for {metric.kind}, but the target looks like {kind}.")
+    if metric.needs_nonneg and (pd.to_numeric(y, errors="coerce") < 0).any():
+        raise ValueError(f"{metric_name} needs a target >= 0, but {spec.target!r} has negative values.")
     if metric.needs_proba and len(classes) != 2:
         raise ValueError(f"{metric_name} is supported for binary targets only; try accuracy or f1_macro.")
     # Positive class for probability metrics: the minority class (usually the event of interest).

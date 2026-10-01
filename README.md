@@ -83,7 +83,8 @@ runs/20261001-120000-breast_cancer/
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
 
-Metrics: `roc_auc` and `log_loss` (binary), `accuracy`, `f1_macro`, `rmse`, `mae`, `r2`.
+Metrics: `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`, `f1_macro`, `rmse`,
+`rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`.
 By default orbit picks `roc_auc` for binary targets, `accuracy` for multiclass and `rmse` for
 regression. Each run also reports a feature-free baseline for reference.
 

@@ -17,10 +17,15 @@ class Metric:
     greater_is_better: bool
     needs_proba: bool
     fn: Callable
+    needs_nonneg: bool = False   # targets and predictions must be >= 0 (log-based metrics)
 
 
 def _rmse(y, p):
     return float(np.sqrt(skm.mean_squared_error(y, p)))
+
+
+def _rmsle(y, p):
+    return float(np.sqrt(np.mean((np.log1p(np.asarray(p, float)) - np.log1p(np.asarray(y, float))) ** 2)))
 
 
 METRICS = {
@@ -29,7 +34,11 @@ METRICS = {
     "accuracy": Metric("accuracy", "classification", True, False, skm.accuracy_score),
     "f1_macro": Metric("f1_macro", "classification", True, False,
                        lambda y, p: skm.f1_score(y, p, average="macro")),
+    "balanced_accuracy": Metric("balanced_accuracy", "classification", True, False,
+                                skm.balanced_accuracy_score),
+    "pr_auc": Metric("pr_auc", "classification", True, True, skm.average_precision_score),
     "rmse": Metric("rmse", "regression", False, False, _rmse),
+    "rmsle": Metric("rmsle", "regression", False, False, _rmsle, needs_nonneg=True),
     "mae": Metric("mae", "regression", False, False, skm.mean_absolute_error),
     "r2": Metric("r2", "regression", True, False, skm.r2_score),
 }
@@ -80,6 +89,8 @@ def check_values(metric: Metric, preds: pd.Series, positive_label=None) -> pd.Se
         raise InvalidPredictions("Regression predictions must be numeric.")
     if not np.isfinite(p).all():
         raise InvalidPredictions("Regression predictions must be finite (no inf).")
+    if metric.needs_nonneg and (p < 0).any():
+        raise InvalidPredictions(f"{metric.name} needs predictions >= 0 (clip or exponentiate them).")
     return p
 
 
@@ -113,3 +124,34 @@ def combine_predictions(metric: Metric, folds: list[pd.Series]) -> pd.Series:
         labels = pd.concat([_labels(f) for f in folds], axis=1)
         return labels.mode(axis=1)[0]
     return pd.concat([check_values(metric, f) for f in folds], axis=1).mean(axis=1)
+
+
+# Wording -> metric, checked in order; the first rule whose words all appear wins. This resolves
+# the common phrasings without an LLM; anything else is left to the planner to map or reject.
+_METRIC_RULES = [
+    (("rmsle",), "rmsle"), (("root mean squared log",), "rmsle"),
+    (("log", "rmse"), "rmsle"), (("log", "root mean squared"), "rmsle"),
+    (("log loss",), "log_loss"), (("logloss",), "log_loss"), (("cross entropy",), "log_loss"),
+    (("pr auc",), "pr_auc"), (("pr_auc",), "pr_auc"), (("average precision",), "pr_auc"),
+    (("precision-recall",), "pr_auc"),
+    (("roc",), "roc_auc"), (("auc",), "roc_auc"),
+    (("balanced accuracy",), "balanced_accuracy"), (("accuracy",), "accuracy"),
+    (("f1",), "f1_macro"),
+    (("rmse",), "rmse"), (("root mean squared",), "rmse"),
+    (("mae",), "mae"), (("mean absolute",), "mae"),
+    (("r2",), "r2"), (("r^2",), "r2"), (("r-squared",), "r2"), (("r squared",), "r2"),
+    (("coefficient of determination",), "r2"),
+]
+
+
+def match_metric(text: str | None) -> str | None:
+    """Map a free-text evaluation description to a metric name, or None if it is unclear."""
+    if not text:
+        return None
+    t = " ".join(text.lower().replace("_", " ").replace("-", " ").split())
+    if t.replace(" ", "_") in METRICS:
+        return t.replace(" ", "_")
+    for words, name in _METRIC_RULES:
+        if all(w.replace("-", " ").replace("_", " ") in t for w in words):
+            return name
+    return None

@@ -80,6 +80,9 @@ class DockerSandbox:
         try:
             proc = subprocess.run(self.command(workdir, data_dir, name), capture_output=True,
                                   text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except KeyboardInterrupt:
+            subprocess.run([self.docker, "kill", name], capture_output=True)
+            raise
         except subprocess.TimeoutExpired as e:
             subprocess.run([self.docker, "kill", name], capture_output=True)
             return ExecResult(-1, _tail(_text(e.stdout)), _tail(_text(e.stderr)) +

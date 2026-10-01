@@ -25,7 +25,6 @@ docker compose --env-file .env -f docker/compose.yaml build sandbox
 - The LLM protocol is plain text (`PLAN:` plus one fenced Python block). Don't require native
   tool calling.
 - `docker/sandbox-requirements.txt` and `prompts.LIBRARIES` must list the same libraries.
-- Docs and READMEs must not contain invented results; only quote numbers from real runs.
 
 ## Workflow
 
@@ -38,3 +37,10 @@ docker compose --env-file .env -f docker/compose.yaml build sandbox
   Host code must work with both pandas 2 and 3 (e.g. use `pd.api.types` checks, not
   `dtype == object`).
 - Line endings are LF (`.gitattributes`).
+- Tests must not write into the repo; use `tmp_path` (MLflow writes artifacts to `./mlruns`,
+  so its tests `chdir` into `tmp_path`).
+- Run Compose from the repo root with `--env-file .env -f docker/compose.yaml`; otherwise it
+  reads `docker/.env` and falls back to defaults. The vLLM image is pinned (`VLLM_IMAGE_TAG`),
+  and MLflow/vLLM are published on 127.0.0.1 only (no auth).
+- Never read, print or commit `.env`; it holds API keys. `.env.example` is the template.
+- Never put invented results in docs; quote only numbers from real runs, with model and settings.

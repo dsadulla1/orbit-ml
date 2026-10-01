@@ -47,12 +47,16 @@ def explore(data: Path = typer.Argument(..., exists=True, help="CSV file"),
 
 @app.command()
 def run(
-    data: Path = typer.Argument(..., exists=True, help="CSV file with features and the target"),
-    target: str = typer.Option(..., "--target", "-t", help="Column to predict"),
-    metric: str = typer.Option(None, "--metric", "-m",
-                               help="roc_auc, log_loss, accuracy, f1_macro, rmse, mae, r2 "
-                                    "(default: inferred)"),
-    goal: str = typer.Option(None, help="Free-text goal or constraints for the agent"),
+    data: list[str] = typer.Argument(..., help="Data: CSV/TSV files, folders, zip files or http(s) "
+                                               "URLs. Text files (data descriptions) are read too."),
+    target: str = typer.Option(None, "--target", "-t",
+                               help="Column to predict (default: inferred from --goal and the data)"),
+    goal: str = typer.Option(None, help="The problem in plain language, e.g. 'predict each house's price'"),
+    eval_text: str = typer.Option(None, "--eval", "--metric", "-m",
+                                  help="How to evaluate: a metric name (roc_auc, pr_auc, log_loss, "
+                                       "accuracy, balanced_accuracy, f1_macro, rmse, rmsle, mae, r2) "
+                                       "or a description such as 'RMSE between log prices' "
+                                       "(default: inferred)"),
     steps: int = typer.Option(20, help="Maximum number of experiments"),
     minutes: float = typer.Option(60, help="Time budget for the whole search"),
     tokens: int = typer.Option(None, help="Optional LLM token budget"),
@@ -64,8 +68,17 @@ def run(
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
     seed: int = typer.Option(42),
 ):
-    """Run an autonomous experiment search on a CSV dataset."""
+    """Solve a prediction problem: orbit builds and compares models, then reports.
+
+    Examples:
+      orbit run data.csv -t churn
+      orbit run examples/house_prices/ --goal "Predict each house's sale price" --eval "RMSE between log prices"
+      orbit run https://example.com/train.csv --goal "Predict survival"
+    """
+    from .planner import PlanError
+    from .problem import run_name, setup_task
     from .sandbox import DockerSandbox, check_docker
+    from .sources import SourceError
     from .tracking import make_tracker
 
     if tracker not in TRACKERS:
@@ -77,8 +90,13 @@ def run(
         raise typer.Exit(1)
     llm = _llm()
 
-    run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{data.stem}"
-    task = prepare(TaskSpec(str(data), target, metric, goal, folds=folds, seed=seed), run_dir)
+    run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{run_name(data)}"
+    try:
+        task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
+                          seed=seed, llm=llm)
+    except (SourceError, PlanError, ValueError) as e:
+        console.print(f"[red]Could not set up the task:[/] {e}")
+        raise typer.Exit(1)
     cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
                        n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
                        cpus=sb_settings.cpus, seed=seed)
@@ -86,8 +104,13 @@ def run(
     trk.start(task, cfg, llm.model)
 
     scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
-    console.print(f"[bold]orbit[/] {run_dir}  model={llm.model}  metric={task.metric_name}  "
-                  f"baseline={task.baseline:.4f}  validation={scheme}  tracker={trk.name}")
+    console.print(f"[bold]orbit[/] {run_dir}  model={llm.model}  tracker={trk.name}")
+    console.print(f"  data: {Path(task.spec.data_path).name}, target={task.spec.target}, "
+                  f"metric={task.metric_name}, baseline={task.baseline:.4f}, validation={scheme}")
+    if task.spec.extras:
+        console.print(f"  extra tables: {', '.join(Path(p).name for p in task.spec.extras)}")
+    for note in task.spec.notes:
+        console.print(f"  [dim]{note}[/]")
 
     def on_node(node, agent):
         best = agent.best()

@@ -102,3 +102,14 @@ def score(metric: Metric, y_true: pd.Series, preds: pd.Series, positive_label=No
     if metric.kind == "classification":
         return float(metric.fn(_labels(y_true), _labels(p)))
     return float(metric.fn(y_true.astype(float), p))
+
+
+def combine_predictions(metric: Metric, folds: list[pd.Series]) -> pd.Series:
+    """Merge the predictions the k fold models made for the same rows: the mean for
+    probabilities and numbers, the most common label for classes."""
+    if len(folds) == 1:
+        return folds[0]
+    if metric.kind == "classification" and not metric.needs_proba:
+        labels = pd.concat([_labels(f) for f in folds], axis=1)
+        return labels.mode(axis=1)[0]
+    return pd.concat([check_values(metric, f) for f in folds], axis=1).mean(axis=1)

@@ -6,8 +6,8 @@ from orbit.task import TaskSpec, prepare
 from conftest import BAD_OUTPUT, BROKEN, LocalSandbox, ScriptedLLM, clf_reply
 
 
-def _agent(tmp_path, csv, replies, **cfg):
-    task = prepare(TaskSpec(str(csv), "label"), tmp_path / "run")
+def _agent(tmp_path, csv, replies, folds=1, **cfg):
+    task = prepare(TaskSpec(str(csv), "label", folds=folds), tmp_path / "run")
     llm = ScriptedLLM(replies)
     config = SearchConfig(exec_timeout=120, **cfg)
     return Agent(task, llm, LocalSandbox(), config), llm
@@ -104,3 +104,22 @@ def test_cut_off_reply_is_reported(clf_csv, tmp_path):
     agent, _ = _agent(tmp_path, clf_csv, ["PLAN: x\n```python\nimport pandas as pd\nX = pd.read"],
                       max_steps=1, n_drafts=1)
     assert "cut off" in agent.run().nodes[0].error
+
+
+def test_cross_validated_search(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, [clf_reply(), BROKEN], folds=3, max_steps=2, n_drafts=2)
+    journal = agent.run()
+    ok, bad = journal.nodes
+    assert len(ok.fold_scores) == 3 and ok.metric == sum(ok.fold_scores) / 3
+    assert ok.test_metric is not None and 0.5 < ok.test_metric <= 1.0
+    assert bad.buggy and bad.error.startswith("fold 1/3: ") and bad.fold_scores == []
+    workdir = agent.task.run_dir / "nodes" / "001"
+    assert all((workdir / f"fold_{k}" / "predictions.csv").exists() for k in (1, 2, 3))
+    assert (workdir / "solution.py").exists() and "=== fold 3/3 ===" in (workdir / "stdout.txt").read_text()
+    assert Journal.load(agent.task.run_dir / "journal.json").nodes[0].fold_scores == ok.fold_scores
+
+
+def test_cross_validation_rejects_bad_rows_in_any_fold(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, [BAD_OUTPUT], folds=3, max_steps=1, n_drafts=1)
+    node = agent.run().nodes[0]
+    assert node.buggy and "fold 1/3" in node.error and "orbit_id" in node.error

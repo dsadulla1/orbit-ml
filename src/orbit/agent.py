@@ -15,8 +15,9 @@ from typing import Callable
 
 from . import prompts
 from .llm import LLM
-from .metrics import InvalidPredictions, check_values, read_predictions, score
-from .sandbox import ExecResult, Sandbox
+from .metrics import (InvalidPredictions, check_values, combine_predictions, read_predictions,
+                      score)
+from .sandbox import SCRIPT, ExecResult, Sandbox
 from .task import Task
 
 ERROR_CHARS = 4_000
@@ -44,7 +45,8 @@ class Node:
     parent: int | None
     plan: str = ""
     code: str | None = None
-    metric: float | None = None        # official validation score
+    metric: float | None = None        # official validation score (mean over folds)
+    fold_scores: list[float] = field(default_factory=list)  # one score per validation fold
     test_metric: float | None = None   # filled for the final best node only
     error: str | None = None
     duration: float = 0.0
@@ -153,11 +155,7 @@ class Agent:
                           if reply.text.count("```") % 2 else
                           "The reply contained no ```python code block.")
         else:
-            result = self.sandbox.run(node.code, workdir, self.task.input_dir, self.cfg.exec_timeout)
-            node.duration = result.duration
-            (workdir / "stdout.txt").write_text(result.stdout, encoding="utf-8")
-            (workdir / "stderr.txt").write_text(result.stderr, encoding="utf-8")
-            self._evaluate(node, result, workdir)
+            self._run_folds(node, workdir)
 
         self.journal.nodes.append(node)
         best = self.best()
@@ -168,24 +166,47 @@ class Agent:
         self.on_node(node, self)
         return node
 
-    def _evaluate(self, node: Node, result: ExecResult, workdir: Path) -> None:
+    def _fwork(self, workdir: Path, fold: int) -> Path:
+        return workdir if self.task.n_folds == 1 else workdir / f"fold_{fold}"
+
+    def _run_folds(self, node: Node, workdir: Path) -> None:
+        """Run the script once per fold and score each fold's validation rows."""
+        task, n = self.task, self.task.n_folds
+        out, err, scores = [], [], []
+        for k in range(1, n + 1):
+            fwork = self._fwork(workdir, k)
+            result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.cfg.exec_timeout)
+            node.duration += result.duration
+            tag = f"fold {k}/{n}: " if n > 1 else ""
+            if n > 1:
+                out.append(f"=== fold {k}/{n} ===\n{result.stdout}")
+                err.append(f"=== fold {k}/{n} ===\n{result.stderr}")
+            else:
+                out, err = [result.stdout], [result.stderr]
+            error, value = self._score_fold(result, fwork, k)
+            if error:
+                node.error = tag + error
+                break
+            scores.append(value)
+        (workdir / "stdout.txt").write_text("\n".join(out), encoding="utf-8")
+        (workdir / "stderr.txt").write_text("\n".join(err), encoding="utf-8")
+        if n > 1:
+            (workdir / SCRIPT).write_text(node.code, encoding="utf-8")
+        if not node.error:
+            node.fold_scores = scores
+            node.metric = sum(scores) / len(scores)
+
+    def _score_fold(self, result: ExecResult, fwork: Path, fold: int) -> tuple[str | None, float | None]:
         if not result.ok:
-            node.error = (result.stderr or result.stdout or f"exit code {result.returncode}")[-ERROR_CHARS:]
-            return
+            return (result.stderr or result.stdout or f"exit code {result.returncode}")[-ERROR_CHARS:], None
         try:
-            val = self.task.labels("val")
-            preds = read_predictions(workdir / "predictions.csv", self._all_ids())
+            val = self.task.labels("val", fold)
+            preds = read_predictions(fwork / "predictions.csv", self.task.fold_ids(fold))
             # Check test rows too, so the final test scoring cannot fail on them.
             check_values(self.task.metric, preds, self.task.positive_label)
-            node.metric = score(self.task.metric, val, preds.loc[val.index], self.task.positive_label)
+            return None, score(self.task.metric, val, preds.loc[val.index], self.task.positive_label)
         except InvalidPredictions as e:
-            node.error = f"Script ran but its output was rejected: {e}"
-
-    def _all_ids(self):
-        if self._ids is None:
-            import pandas as pd
-            self._ids = pd.Index(pd.read_csv(self.task.run_dir / "hidden" / "labels.csv")["orbit_id"])
-        return self._ids
+            return f"Script ran but its output was rejected: {e}", None
 
     def best(self) -> Node | None:
         ranked = self.journal.ranked(self.task.metric)
@@ -229,9 +250,11 @@ class Agent:
             test = self.task.labels("test")
             workdir = self.task.run_dir / "nodes" / f"{best.id:03d}"
             try:
-                preds = read_predictions(workdir / "predictions.csv", self._all_ids())
-                best.test_metric = score(self.task.metric, test, preds.loc[test.index],
-                                         self.task.positive_label)
+                per_fold = [read_predictions(self._fwork(workdir, k) / "predictions.csv",
+                                             self.task.fold_ids(k)).loc[test.index]
+                            for k in range(1, self.task.n_folds + 1)]
+                preds = combine_predictions(self.task.metric, per_fold)
+                best.test_metric = score(self.task.metric, test, preds, self.task.positive_label)
             except Exception as e:  # noqa: BLE001 - still save the journal and the report
                 log.warning("could not score experiment #%s on the test split: %s", best.id, e)
             j.best_id = best.id

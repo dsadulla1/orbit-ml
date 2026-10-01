@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from orbit.metrics import METRICS, InvalidPredictions, read_predictions, score
+from orbit.metrics import METRICS, InvalidPredictions, combine_predictions, read_predictions, score
 from orbit.prompts import SYSTEM, parse_response
 
 
@@ -76,3 +76,12 @@ def test_system_prompt_formats_and_warns_about_early_stopping():
                          prediction_rule="rule", timeout=60, cpus=2)
     assert "early_stopping_rounds" in text and "lgb.early_stopping" in text and "verbose_eval" in text
     assert "f\"{score:.4f}\"" in text
+
+
+def test_combine_fold_predictions():
+    a, b, c = (pd.Series([0.2, 0.8], index=[1, 2]), pd.Series([0.4, 0.6], index=[1, 2]),
+               pd.Series([0.0, 1.0], index=[1, 2]))
+    assert combine_predictions(METRICS["roc_auc"], [a, b, c]).round(3).tolist() == [0.2, 0.8]
+    assert combine_predictions(METRICS["rmse"], [a]).tolist() == [0.2, 0.8]
+    labels = [pd.Series(x, index=[1, 2]) for x in (["a", "b"], ["a", "a"], ["b", "b"])]
+    assert combine_predictions(METRICS["accuracy"], labels).tolist() == ["a", "b"]

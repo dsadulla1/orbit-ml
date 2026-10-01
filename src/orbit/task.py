@@ -1,13 +1,19 @@
 """Task setup: split data, hide labels, profile the dataset for the agent.
 
-Data layout inside a run directory:
+Data layout inside a run directory. With one validation split (`folds == 1`):
 
     input/train.csv   features + target           (mounted read-only into the sandbox)
     input/test.csv    features + orbit_id, no labels (validation and test rows, shuffled together)
-    hidden/labels.csv orbit_id, split, target     (never mounted; used only by the scorer)
+    hidden/labels.csv orbit_id, split, fold, target  (never mounted; used only by the scorer)
 
-The agent cannot tell which unlabeled rows are validation (used to rank experiments
-during search) and which are test (scored once, for the final best experiment).
+With k-fold cross-validation (`folds > 1`) every fold gets its own pair of files, and only that
+fold's directory is mounted, so a script never sees another fold's labels:
+
+    input/fold_1/train.csv, input/fold_1/test.csv   ... input/fold_k/...
+
+Each fold's test.csv holds that fold's validation rows plus all test rows. The agent cannot tell
+which unlabeled rows are validation (used to rank experiments during search) and which are test
+(scored once, for the final best experiment, from the average of the k fold predictions).
 """
 import json
 from dataclasses import asdict, dataclass
@@ -15,11 +21,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .metrics import ID_COL, METRICS, Metric, score
 
 MAX_CLASSES = 30
+AUTO_FOLDS = 5
+AUTO_CV_MAX_ROWS = 10_000  # larger datasets use one validation split: k runs per experiment is costly
 
 
 @dataclass
@@ -30,6 +38,7 @@ class TaskSpec:
     goal: str | None = None
     val_size: float = 0.2
     test_size: float = 0.2
+    folds: int | None = None  # None: 5-fold CV for small datasets, one split otherwise; 1: one split
     seed: int = 42
 
 
@@ -44,6 +53,7 @@ class Task:
     n_train: int
     profile: str
     baseline: float
+    n_folds: int = 1
 
     @property
     def metric(self) -> Metric:
@@ -53,10 +63,26 @@ class Task:
     def input_dir(self) -> Path:
         return self.run_dir / "input"
 
-    def labels(self, split: str) -> pd.Series:
-        df = pd.read_csv(self.run_dir / "hidden" / "labels.csv")
-        df = df[df["split"] == split].set_index(ID_COL)
-        return df["target"]
+    def fold_dir(self, fold: int) -> Path:
+        """Directory mounted into the sandbox for fold `fold` (1-based)."""
+        return self.input_dir if self.n_folds == 1 else self.input_dir / f"fold_{fold}"
+
+    def _labels_df(self) -> pd.DataFrame:
+        return pd.read_csv(self.run_dir / "hidden" / "labels.csv")
+
+    def labels(self, split: str, fold: int | None = None) -> pd.Series:
+        df = self._labels_df()
+        df = df[df["split"] == split]
+        if fold is not None and "fold" in df.columns:
+            df = df[df["fold"] == fold]
+        return df.set_index(ID_COL)["target"]
+
+    def fold_ids(self, fold: int) -> pd.Index:
+        """The rows a script must predict in fold `fold`: its validation rows plus the test rows."""
+        df = self._labels_df()
+        if "fold" not in df.columns:
+            return pd.Index(df[ID_COL])
+        return pd.Index(df.loc[(df["fold"] == fold) | (df["split"] == "test"), ID_COL])
 
     def save(self) -> None:
         d = asdict(self)
@@ -160,29 +186,68 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     # Positive class for probability metrics: the minority class (usually the event of interest).
     positive_label = str(y.astype(str).value_counts().idxmin()) if metric.needs_proba else None
 
-    holdout = spec.val_size + spec.test_size
-    train, rest = _split(df, spec.target, kind, holdout, spec.seed)
-    val, test = _split(rest, spec.target, kind, spec.test_size / holdout, spec.seed)
-
-    hidden = pd.concat([val.assign(_split="val"), test.assign(_split="test")])
-    hidden = hidden.sample(frac=1.0, random_state=spec.seed).reset_index(drop=True)
     rng = np.random.default_rng(spec.seed)
-    hidden[ID_COL] = rng.permutation(len(hidden)) + 1
+    if spec.folds is not None and spec.folds < 1:
+        raise ValueError("folds must be at least 1.")
+    n_folds = spec.folds or (AUTO_FOLDS if len(df) * (1 - spec.test_size) <= AUTO_CV_MAX_ROWS else 1)
 
     (run_dir / "input").mkdir(parents=True, exist_ok=True)
     (run_dir / "hidden").mkdir(parents=True, exist_ok=True)
-    train.to_csv(run_dir / "input" / "train.csv", index=False)
     features = [c for c in df.columns if c != spec.target]
-    hidden[[ID_COL] + features].to_csv(run_dir / "input" / "test.csv", index=False)
-    hidden[[ID_COL, "_split", spec.target]].rename(
-        columns={"_split": "split", spec.target: "target"}
+
+    if n_folds == 1:
+        holdout = spec.val_size + spec.test_size
+        train, rest = _split(df, spec.target, kind, holdout, spec.seed)
+        val, test = _split(rest, spec.target, kind, spec.test_size / holdout, spec.seed)
+        parts = [(train, val, test)]
+        dev = train
+        val_rows, test_rows = [val.assign(_fold=1)], test.assign(_fold=0)
+        profile_df = train
+    else:
+        dev, test = _split(df, spec.target, kind, spec.test_size, spec.seed)
+        if len(dev) < 2 * n_folds:
+            raise ValueError(f"Too few rows ({len(dev)}) for {n_folds}-fold cross-validation; "
+                             "pass --folds 1 or provide more data.")
+        parts = []
+        val_rows, test_rows = [], test.assign(_fold=0)
+        for k, (tr_idx, va_idx) in enumerate(_folds(dev, spec.target, kind, n_folds, spec.seed), 1):
+            parts.append((dev.iloc[tr_idx], dev.iloc[va_idx], test))
+            val_rows.append(dev.iloc[va_idx].assign(_fold=k))
+        profile_df = dev
+
+    hidden = pd.concat([pd.concat(val_rows).assign(_split="val"), test_rows.assign(_split="test")])
+    hidden = hidden.sample(frac=1.0, random_state=spec.seed).reset_index(drop=True)
+    hidden[ID_COL] = rng.permutation(len(hidden)) + 1
+    hidden[[ID_COL, "_split", "_fold", spec.target]].rename(
+        columns={"_split": "split", "_fold": "fold", spec.target: "target"}
     ).to_csv(run_dir / "hidden" / "labels.csv", index=False)
+
+    baselines = []
+    for k, (train_k, val_k, _) in enumerate(parts, 1):
+        out = run_dir / "input" if n_folds == 1 else run_dir / "input" / f"fold_{k}"
+        out.mkdir(parents=True, exist_ok=True)
+        train_k.to_csv(out / "train.csv", index=False)
+        ids = hidden[(hidden["_fold"] == (1 if n_folds == 1 else k)) & (hidden["_split"] == "val")
+                     | (hidden["_split"] == "test")]
+        ids.sample(frac=1.0, random_state=spec.seed + k)[[ID_COL] + features].to_csv(
+            out / "test.csv", index=False)
+        baselines.append(_baseline(metric, train_k[spec.target], val_k[spec.target], positive_label))
 
     task = Task(
         spec=spec, run_dir=run_dir, kind=kind, metric_name=metric_name,
-        positive_label=positive_label, classes=classes, n_train=len(train),
-        profile=profile(train, spec.target),
-        baseline=_baseline(metric, train[spec.target], val[spec.target], positive_label),
+        positive_label=positive_label, classes=classes, n_train=len(parts[0][0]),
+        profile=profile(profile_df, spec.target), baseline=float(np.mean(baselines)),
+        n_folds=n_folds,
     )
     task.save()
     return task
+
+
+def _folds(df: pd.DataFrame, target: str, kind: str, n: int, seed: int):
+    """k-fold indices; stratified for classification unless a class is too rare."""
+    if kind == "classification":
+        try:
+            return list(StratifiedKFold(n, shuffle=True, random_state=seed).split(df, df[target].astype(str)))
+        except ValueError:
+            pass
+    return list(KFold(n, shuffle=True, random_state=seed).split(df))

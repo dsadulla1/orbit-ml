@@ -49,7 +49,7 @@ flowchart LR
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), Docker.
 
 ```bash
-git clone https://github.com/OWNER/orbit && cd orbit
+git clone https://github.com/dsadulla1/orbit-ml && cd orbit-ml
 uv sync
 cp .env.example .env                       # add OPENAI_API_KEY
 

@@ -6,7 +6,7 @@ FROM python:3.12.14-slim
 
 LABEL org.opencontainers.image.title="orbit-sandbox" \
       org.opencontainers.image.description="Isolated runtime for orbit's generated ML experiment scripts" \
-      org.opencontainers.image.source="https://github.com/OWNER/orbit" \
+      org.opencontainers.image.source="https://github.com/dsadulla1/orbit-ml" \
       org.opencontainers.image.licenses="MIT"
 
 # libgomp1: OpenMP runtime required by lightgbm and xgboost wheels.

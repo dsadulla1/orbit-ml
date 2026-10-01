@@ -4,6 +4,7 @@ MLflow: one parent run per orbit run, one nested child run per experiment.
 W&B:    one run per orbit run; experiments are logged as steps plus a summary table.
 Tracking problems are reported but never abort a search.
 """
+import json
 import logging
 import os
 import statistics
@@ -65,6 +66,10 @@ class MLflowTracker:
         })
         mlflow.log_metric("baseline", task.baseline)
         mlflow.log_text(task.profile, "data_profile.txt")
+        # Lets `orbit results` and the HTML report link to (and fetch from) this run.
+        (task.run_dir / "tracking.json").write_text(json.dumps({
+            "tracker": "mlflow", "uri": mlflow.get_tracking_uri(),
+            "experiment_id": self.parent.info.experiment_id, "run_id": self.parent.info.run_id}))
 
     @_safe
     def log_node(self, node, workdir: Path):

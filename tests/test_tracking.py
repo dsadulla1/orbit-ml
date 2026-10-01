@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from orbit.agent import Agent, SearchConfig
@@ -43,6 +45,9 @@ def test_mlflow_logs_parent_and_nested_runs(clf_csv, tmp_path, mlflow_uri):
     assert parent.data.tags["orbit.best_experiment"] == "1"
     assert {a.path for a in client.list_artifacts(parent.info.run_id)} >= {
         "journal.json", "report.md", "data_profile.txt"}
+
+    info = json.loads((task.run_dir / "tracking.json").read_text())
+    assert info["run_id"] == parent.info.run_id and info["uri"] == mlflow_uri
 
     assert len(children) == 2
     assert sorted(r.data.tags["orbit.status"] for r in children) == ["failed", "ok"]

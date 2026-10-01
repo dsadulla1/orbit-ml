@@ -74,4 +74,5 @@ def test_score_rejects_non_finite_regression():
 def test_system_prompt_formats_and_warns_about_early_stopping():
     text = SYSTEM.format(libraries="numpy", target="y", id_col="orbit_id", pred_col="prediction",
                          prediction_rule="rule", timeout=60, cpus=2)
-    assert "early_stopping_rounds" in text and "lightgbm.early_stopping" in text
+    assert "early_stopping_rounds" in text and "lgb.early_stopping" in text and "verbose_eval" in text
+    assert "f\"{score:.4f}\"" in text

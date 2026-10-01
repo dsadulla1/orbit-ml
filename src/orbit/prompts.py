@@ -16,6 +16,10 @@ self-contained Python script that will be executed in a sandbox.
 
 Sandbox rules:
 - Available libraries: {libraries}. Nothing else; no pip installs, no internet access.
+- The libraries are recent releases; use their current APIs. For early stopping, hold out a \
+validation set and pass it (valid_sets / eval_set), then use callbacks=[lightgbm.early_stopping(50)] \
+with LightGBM or early_stopping_rounds in the XGBoost estimator's constructor. Without a \
+validation set, skip early stopping. Never pass early_stopping_rounds to lightgbm.train() or fit().
 - Read training data from data/train.csv (features + target column {target!r}).
 - Read data/test.csv (features + an {id_col!r} column, no labels) and predict EVERY row.
 - Write predictions.csv in the current directory with exactly two columns: {id_col!r}, {pred_col!r}.

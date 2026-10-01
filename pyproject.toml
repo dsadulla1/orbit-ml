@@ -1,7 +1,36 @@
 [project]
-name = "project-20261001"
+name = "orbit"
 version = "0.1.0"
-description = "Add your description here"
+description = "An LLM agent that autonomously designs, runs and compares ML experiments in sandboxed containers."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "openai>=1.40",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "typer>=0.12",
+    "rich>=13",
+    "mlflow>=3.5.1",
+]
+
+[project.optional-dependencies]
+mcp = ["mlflow[mcp]>=3.5.1"]
+wandb = ["wandb>=0.18"]
+
+[project.scripts]
+orbit = "orbit.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orbit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

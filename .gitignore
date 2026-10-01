@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# orbit run outputs and trackers
+runs/
+mlruns/
+mlartifacts/
+mlflow.db
+wandb/
+
+# Local secrets
+.env

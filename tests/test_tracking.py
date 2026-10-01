@@ -47,3 +47,20 @@ def test_mlflow_logs_parent_and_nested_runs(clf_csv, tmp_path, mlflow_uri):
     assert sorted(r.data.tags["orbit.status"] for r in children) == ["failed", "ok"]
     child_artifacts = {a.path for a in client.list_artifacts(children[0].info.run_id)}
     assert "solution.py" in child_artifacts
+
+
+def test_mlflow_finish_closes_run_without_test_score(clf_csv, tmp_path, mlflow_uri):
+    import mlflow
+
+    task = prepare(TaskSpec(str(clf_csv), "label"), tmp_path / "run")
+    cfg = SearchConfig(max_steps=1, n_drafts=1)
+    tracker = MLflowTracker(experiment="orbit-test")
+    tracker.start(task, cfg, "scripted")
+    agent = Agent(task, ScriptedLLM([clf_reply()]), LocalSandbox(), cfg, tracker=tracker)
+    agent.step()
+    (task.run_dir / "nodes" / "001" / "predictions.csv").unlink()  # test scoring fails
+    agent.finalize("done")
+
+    run = mlflow.MlflowClient().get_run(tracker.parent.info.run_id)
+    assert run.info.status == "FINISHED" and run.data.tags["orbit.stop_reason"] == "done"
+    assert mlflow.active_run() is None

@@ -80,14 +80,17 @@ class MLflowTracker:
     @_safe
     def finish(self, task, journal):
         client, run_id = self.mlflow.MlflowClient(), self.parent.info.run_id
-        best = journal.get(journal.best_id) if journal.best_id else None
-        if best:
-            client.log_metric(run_id, "best_val_score", best.metric)
-            client.log_metric(run_id, "best_test_score", best.test_metric)
-            client.set_tag(run_id, "orbit.best_experiment", str(best.id))
-        client.set_tag(run_id, "orbit.stop_reason", journal.stop_reason or "")
-        client.log_artifact(run_id, str(task.run_dir / "journal.json"))
-        self.mlflow.end_run()
+        try:
+            best = journal.get(journal.best_id) if journal.best_id else None
+            if best:
+                client.log_metric(run_id, "best_val_score", best.metric)
+                if best.test_metric is not None:
+                    client.log_metric(run_id, "best_test_score", best.test_metric)
+                client.set_tag(run_id, "orbit.best_experiment", str(best.id))
+            client.set_tag(run_id, "orbit.stop_reason", journal.stop_reason or "")
+            client.log_artifact(run_id, str(task.run_dir / "journal.json"))
+        finally:  # never leave the parent run RUNNING, e.g. when artifact upload fails
+            self.mlflow.end_run()
 
     @_safe
     def log_report(self, path: Path):

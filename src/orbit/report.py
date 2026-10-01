@@ -74,6 +74,7 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
 
 
 _NUM = re.compile(r"(?<![\w.])[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?")
+_LIST_MARKER = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)  # "1. " / "2) " list items
 
 
 def _numbers(obj) -> list[float]:
@@ -94,7 +95,7 @@ def check_numbers(text: str, fact_dict: dict) -> list[str]:
     """Return numbers in `text` that cannot be traced to `fact_dict` (at the precision written)."""
     known = _numbers(fact_dict)
     unverified = []
-    for token in _NUM.findall(text):
+    for token in _NUM.findall(_LIST_MARKER.sub("", text)):
         raw = token.replace(",", "")
         is_pct = raw.endswith("%")
         raw = raw.rstrip("%")

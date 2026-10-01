@@ -75,7 +75,7 @@ class DockerSandbox:
         # Pre-create the mount point so Docker doesn't create it root-owned on the host.
         (workdir / "data").mkdir(exist_ok=True)
         (workdir / SCRIPT).write_text(code, encoding="utf-8")
-        name =f"orbit-{uuid.uuid4().hex[:12]}"
+        name = f"orbit-{uuid.uuid4().hex[:12]}"
         start = time.monotonic()
         try:
             proc = subprocess.run(self.command(workdir, data_dir, name), capture_output=True,
@@ -85,11 +85,21 @@ class DockerSandbox:
             raise
         except subprocess.TimeoutExpired as e:
             subprocess.run([self.docker, "kill", name], capture_output=True)
+            _remove_symlinks(workdir)
             return ExecResult(-1, _tail(_text(e.stdout)), _tail(_text(e.stderr)) +
                               f"\nTimeoutError: experiment exceeded {timeout}s and was killed.",
                               time.monotonic() - start, timed_out=True)
+        _remove_symlinks(workdir)
         return ExecResult(proc.returncode, _tail(proc.stdout), _tail(proc.stderr),
                           time.monotonic() - start)
+
+
+def _remove_symlinks(workdir: Path) -> None:
+    """The orchestrator reads, writes and uploads files in `workdir` after the run. A link
+    planted by the script (e.g. stdout.txt -> a host file) would make it touch host files."""
+    for p in workdir.iterdir():
+        if p.is_symlink():
+            p.unlink()
 
 
 def _text(b) -> str:

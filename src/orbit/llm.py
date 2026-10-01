@@ -45,7 +45,9 @@ class OpenAICompatLLM:
                       {"role": "user", "content": user}],
             **kwargs,
         )
-        text = _THINK.sub("", resp.choices[0].message.content or "").strip()
+        text = _THINK.sub("", resp.choices[0].message.content or "")
+        # Some chat templates open <think> in the prompt, so only the closing tag is returned.
+        text = text.rpartition("</think>")[2].strip()
         usage = resp.usage
         return Completion(text,
                           getattr(usage, "prompt_tokens", 0) or 0,

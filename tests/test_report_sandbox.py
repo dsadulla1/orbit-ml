@@ -1,4 +1,7 @@
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from orbit.agent import Agent, SearchConfig
 from orbit.config import SandboxSettings
@@ -53,3 +56,50 @@ def test_docker_command_is_locked_down():
         assert flag in joined
     assert any(a.endswith(":/work/data:ro") for a in cmd)
     assert cmd[-3:] == ["img", "python", "solution.py"]
+
+
+def test_check_numbers_ignores_list_markers():
+    f = {"best": {"val_score": 0.9123}, "experiments_run": 12}
+    text = "**Next steps:**\n1. Tune the model.\n2) Add features.\n  3. Score 0.95."
+    assert check_numbers(text, f) == ["0.95"]
+
+
+def _can_symlink(tmp_path):
+    try:
+        (tmp_path / "probe").symlink_to(tmp_path)
+        return True
+    except OSError:
+        return False
+
+
+def test_docker_sandbox_removes_symlinks_left_by_the_script(tmp_path, monkeypatch):
+    if not _can_symlink(tmp_path):
+        pytest.skip("symlinks need extra privileges on this system")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host file")
+    workdir = tmp_path / "exp"
+
+    def fake_run(cmd, **kwargs):
+        # A script can plant links to host paths (found via /proc/self/mountinfo).
+        for name in ("stdout.txt", "predictions.csv", "prompt.md"):
+            (workdir / name).symlink_to(secret)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("orbit.sandbox.subprocess.run", fake_run)
+    DockerSandbox().run("print(1)", workdir, tmp_path, 10)
+    assert not any(p.is_symlink() for p in workdir.iterdir())
+    assert secret.read_text() == "host file"
+
+
+def test_orphan_think_close_tag_is_stripped():
+    from types import SimpleNamespace
+
+    from orbit.config import LLMSettings
+    from orbit.llm import OpenAICompatLLM
+
+    llm = OpenAICompatLLM(LLMSettings(base_url="http://localhost:1/v1", api_key="k", model="m"))
+    msg = SimpleNamespace(content="reasoning ```python\nlong draft\n```</think>\nPLAN: x\n```python\nok\n```")
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
+    llm.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: resp)))
+    assert llm.complete("s", "u").text == "PLAN: x\n```python\nok\n```"

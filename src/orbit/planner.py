@@ -192,8 +192,12 @@ def plan(tables: list[Path], docs: list[Path], goal: str | None = None, eval_tex
     for n, f in frames.items():
         if n == primary:
             continue
-        if set(f.columns) == wanted or set(f.columns) == set(frames[primary].columns):
-            notes.append(f"ignored {n}: same columns as {primary}, so it has no extra information")
+        if choice["target"] in f.columns:
+            # Extra tables are readable by the generated code, so one with labels would leak them.
+            notes.append(f"ignored {n}: it contains the target column {choice['target']!r}, and generated "
+                         f"code must never see labels (combine files first to use it as training data)")
+        elif set(f.columns) == wanted:
+            notes.append(f"ignored {n}: same columns as {primary} without the target, so it has no extra information")
         else:
             extras.append(paths[n])
     return Plan(primary=paths[primary], target=choice["target"], metric=choice["metric"],

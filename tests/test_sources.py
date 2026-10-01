@@ -103,3 +103,16 @@ def test_url_errors(server, tmp_path, monkeypatch):
     with pytest.raises(SourceError, match="limit"):
         sources.download(f"{server}/train.csv", tmp_path / "d", max_bytes=4)
     assert not list((tmp_path / "d").glob("*.csv"))
+
+
+def test_directory_copy_skips_earlier_runs_and_the_output_folder(tmp_path):
+    proj = tmp_path / "proj"
+    _write(proj / "data.csv")
+    _write(proj / "runs" / "old" / "hidden" / "labels.csv")
+    _write(proj / "results" / "old" / "task.json", "{}")                 # an earlier run in a custom --out
+    _write(proj / "results" / "old" / "input" / "train.csv")
+    (proj / "results" / "old" / "hidden").mkdir()
+    _write(proj / "hidden" / "labels.csv")
+    run_dir = proj / "results" / "run1"
+    r = resolve([str(proj)], run_dir / "source")
+    assert [p.name for p in r.tables] == ["data.csv"]

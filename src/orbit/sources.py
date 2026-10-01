@@ -19,6 +19,9 @@ MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 200
 MAX_DEPTH = 3
+# Folders never copied from a source directory: earlier orbit runs (their hidden labels must not
+# become an input table), tracker output and tooling.
+SKIP_DIRS = {"runs", "hidden", "mlruns", "wandb", "__pycache__", "node_modules", "venv"}
 _CONTENT_TYPES = {"text/csv": ".csv", "text/tab-separated-values": ".tsv", "text/plain": ".txt",
                   "application/zip": ".zip", "application/gzip": ".csv.gz"}
 
@@ -148,7 +151,7 @@ def resolve(sources: list[str], dest: Path) -> Resolved:
         home.mkdir(parents=True, exist_ok=True)
         if path.is_dir():
             copied = home / path.name
-            _copy_tree(path, copied)
+            _copy_tree(path, copied, avoid=dest)
             _collect(copied, home, out)
         else:
             if _kind(path) is None:
@@ -163,18 +166,27 @@ def resolve(sources: list[str], dest: Path) -> Resolved:
     return out
 
 
-def _copy_tree(src: Path, dst: Path) -> None:
-    """Copy a directory without following symlinks and without exceeding the file limit."""
-    count = 0
+def _copy_tree(src: Path, dst: Path, avoid: Path | None = None) -> None:
+    """Copy a directory without following symlinks. Skips hidden and tool folders, orbit run
+    folders, the destination (`avoid`), and stops at the file-count and byte limits."""
+    avoid = avoid.resolve() if avoid else None
+    # Folders that are orbit runs (task.json next to hidden/), wherever they were saved.
+    runs = [t.parent for t in src.rglob("task.json") if (t.parent / "hidden").is_dir()]
+    count = total = 0
     for p in src.rglob("*"):
         rel = p.relative_to(src)
-        if p.is_symlink() or any(part.startswith(".") for part in rel.parts):
+        if p.is_symlink() or any(part.startswith(".") or part in SKIP_DIRS for part in rel.parts):
+            continue
+        if (avoid and p.resolve().is_relative_to(avoid)) or any(r in p.parents for r in runs):
             continue
         if len(rel.parts) > MAX_DEPTH + 1 and p.is_file():
             continue
         if p.is_file() and _kind(p) is not None:
             count += 1
+            total += p.stat().st_size
             if count > MAX_FILES:
                 raise SourceError(f"more than {MAX_FILES} files in {src}; point orbit at a smaller folder")
+            if total > MAX_UNZIPPED_BYTES:
+                raise SourceError(f"{src} holds more than {MAX_UNZIPPED_BYTES / 1e9:.0f} GB of data files")
             (dst / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst / rel)

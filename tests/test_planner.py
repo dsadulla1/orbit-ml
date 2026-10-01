@@ -83,3 +83,14 @@ def test_target_in_several_tables_prefers_train(tmp_path):
         pd.DataFrame({"x": range(n), "y": range(n)}).to_csv(tmp_path / name, index=False)
     p = plan([tmp_path / "sample.csv", tmp_path / "train.csv"], [], target="y")
     assert p.primary.name == "train.csv" and any("using train.csv" in n for n in p.notes)
+
+
+def test_extra_table_with_the_target_is_never_exposed(tmp_path):
+    base = pd.DataFrame({"id": range(40), "a": range(40), "y": [0, 1] * 20})
+    base.to_csv(tmp_path / "train.csv", index=False)
+    base.assign(z=1).to_csv(tmp_path / "full.csv", index=False)           # same labels, more columns
+    base[["id", "y"]].to_csv(tmp_path / "solution.csv", index=False)      # a labels-only file
+    pd.DataFrame({"id": range(40), "w": 1}).to_csv(tmp_path / "side.csv", index=False)
+    p = plan(sorted(tmp_path.glob("*.csv")), [], target="y")
+    assert [e.name for e in p.extras] == ["side.csv"]
+    assert sum("contains the target column" in n for n in p.notes) == 2

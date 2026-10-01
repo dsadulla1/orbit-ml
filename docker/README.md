@@ -59,6 +59,18 @@ use `VLLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ`, `VLLM_TP=1` and one
 device ID; that model is dense, so also drop `--enable-expert-parallel` from the
 command.
 
+The image is pinned with `VLLM_IMAGE_TAG` (default `v0.29.0`). A local `latest` tag is
+often an old pull, so don't rely on it.
+
+If the server doesn't come up:
+
+- **Out of memory / not enough KV cache:** lower `VLLM_MAX_MODEL_LEN` (16384 is plenty for
+  orbit's prompts) or raise `VLLM_GPU_UTIL` slightly.
+- **Errors about expert parallelism:** remove `--enable-expert-parallel` from the command;
+  whether it's required depends on the vLLM version.
+- **Container "unhealthy" while `curl localhost:8000/v1/models` works:** the healthcheck
+  could not run `python3` in the image; the server itself is fine.
+
 Then point orbit at it in `.env`:
 
 ```

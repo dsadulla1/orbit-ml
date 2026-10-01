@@ -54,18 +54,19 @@ services:
     profiles: ["local-llm"]
     # The image entrypoint is `vllm serve`; these are its arguments.
     # Single-GPU fallback: VLLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ, VLLM_TP=1,
-    # one entry in device_ids, and drop --enable-expert-parallel (dense model).
+    # one entry in device_ids. If the MoE weights fail to load with TP=2, add
+    # --enable-expert-parallel (see docker/README.md).
     # Tool-calling flags (--enable-auto-tool-choice, --tool-call-parser) are not
     # needed: orbit only uses plain chat completions.
     command:
-      - --model=${VLLM_MODEL:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}
+      - --model=${VLLM_MODEL:-nm-testing/Qwen3-Coder-30B-A3B-Instruct-W4A16-awq}
       - --served-model-name=${VLLM_SERVED_NAME:-orbit-coder}
       # TP must evenly divide the model's attention heads, so 3 usually fails;
       # use 2 GPUs and leave the third free.
       - --tensor-parallel-size=${VLLM_TP:-2}
-      # Required by the AWQ build of this MoE model.
-      - --enable-expert-parallel
-      - --max-model-len=${VLLM_MAX_MODEL_LEN:-32768}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-16384}
+      # orbit runs one experiment at a time; few sequences leave more room for KV cache.
+      - --max-num-seqs=${VLLM_MAX_NUM_SEQS:-4}
       - --gpu-memory-utilization=${VLLM_GPU_UTIL:-0.90}
       - --host=0.0.0.0
       - --port=8000

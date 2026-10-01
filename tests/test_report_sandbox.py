@@ -103,3 +103,30 @@ def test_orphan_think_close_tag_is_stripped():
     llm.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
         create=lambda **kw: resp)))
     assert llm.complete("s", "u").text == "PLAN: x\n```python\nok\n```"
+
+
+def _fake_container(monkeypatch, script):
+    """Replace the docker command with a trusted local script to test run() plumbing."""
+    import sys
+    monkeypatch.setattr(DockerSandbox, "command",
+                        lambda self, w, d, n: [sys.executable, "-c", script])
+
+
+def test_docker_sandbox_keeps_only_log_tail(tmp_path, monkeypatch):
+    _fake_container(monkeypatch, "import sys; print('x' * 50_000 + 'END'); sys.stderr.write('boom'); sys.exit(3)")
+    result = DockerSandbox().run("ignored", tmp_path / "exp", tmp_path, 30)
+    assert result.returncode == 3 and not result.ok
+    assert result.stdout.startswith("...[truncated]...") and result.stdout.rstrip().endswith("END")
+    assert len(result.stdout) < 21_000 and result.stderr == "boom"
+
+
+def test_docker_sandbox_timeout(tmp_path, monkeypatch):
+    _fake_container(monkeypatch, "import time; print('started', flush=True); time.sleep(30)")
+    result = DockerSandbox().run("ignored", tmp_path / "exp", tmp_path, 1)
+    assert result.timed_out and "started" in result.stdout and "TimeoutError" in result.stderr
+
+
+def test_root_host_runs_sandbox_as_unprivileged_user(monkeypatch):
+    monkeypatch.setattr("orbit.sandbox._host_is_root", lambda: True)
+    cmd = DockerSandbox(SandboxSettings(image="img")).command(Path("w"), Path("d"), "n")
+    assert cmd[cmd.index("--user") + 1] == "1000:1000"

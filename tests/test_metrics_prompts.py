@@ -1,0 +1,47 @@
+import pandas as pd
+import pytest
+
+from orbit.metrics import METRICS, InvalidPredictions, read_predictions, score
+from orbit.prompts import parse_response
+
+
+def _write(tmp_path, df):
+    path = tmp_path / "predictions.csv"
+    df.to_csv(path, index=False)
+    return path
+
+
+def test_read_predictions_validates(tmp_path):
+    ids = pd.Index([1, 2, 3])
+    good = _write(tmp_path, pd.DataFrame({"orbit_id": [3, 1, 2], "prediction": [0.1, 0.2, 0.3]}))
+    assert list(read_predictions(good, ids)) == [0.2, 0.3, 0.1]  # reordered to expected ids
+
+    with pytest.raises(InvalidPredictions, match="missing 1 of 3"):
+        read_predictions(_write(tmp_path, pd.DataFrame({"orbit_id": [1, 2], "prediction": [0, 1]})), ids)
+    with pytest.raises(InvalidPredictions, match="must have columns"):
+        read_predictions(_write(tmp_path, pd.DataFrame({"pred": [1, 2, 3]})), ids)
+    with pytest.raises(InvalidPredictions, match="not written"):
+        read_predictions(tmp_path / "absent.csv", ids)
+
+
+def test_score_probability_metric():
+    y = pd.Series(["no", "yes", "yes", "no"])
+    assert score(METRICS["roc_auc"], y, pd.Series([0.1, 0.9, 0.8, 0.2]), "yes") == 1.0
+    with pytest.raises(InvalidPredictions, match="probabilities"):
+        score(METRICS["roc_auc"], y, pd.Series(["no", "yes", "yes", "no"]), "yes")
+
+
+def test_score_labels_and_regression():
+    assert score(METRICS["accuracy"], pd.Series([1, 0, 1]), pd.Series(["1", "0", "0"])) == pytest.approx(2 / 3)
+    assert score(METRICS["rmse"], pd.Series([1.0, 3.0]), pd.Series([1.0, 1.0])) == pytest.approx(2 ** 0.5)
+
+
+def test_parse_response_variants():
+    plan, code = parse_response("PLAN: Try RF.\n```python\nprint(1)\n```")
+    assert plan == "Try RF." and code == "print(1)"
+
+    plan, code = parse_response("Here is my idea\n```\nx = 1\n```\n```python\nprint('longer')\n```")
+    assert code == "print('longer')"  # longest block wins
+
+    plan, code = parse_response("PLAN: no code at all")
+    assert code is None and plan == "no code at all"

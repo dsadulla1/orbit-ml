@@ -141,6 +141,7 @@ _C = r"(\d+|" + "|".join(_NUMWORDS) + r")"
 _CLAIM = re.compile(
     rf"\b{_C}\s+(?:of\s+(?:the\s+)?{_C}\s+)?experiments?\s+(?:\w+\s+)?(succeeded|failed|crashed)\b"
     rf"(?:\s+(?:out of|of)\s+(?:the\s+)?{_C}\b)?", re.IGNORECASE)
+_BARE = re.compile(rf"\b{_C}\s+(succeeded|failed|crashed)\b", re.IGNORECASE)  # "7 succeeded and 3 failed"
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 _QUALIFIED = re.compile(r"debug|draft|improve|fix|first|best|runner|#\d|experiment \d", re.IGNORECASE)
 
@@ -158,6 +159,12 @@ def check_claims(text: str, fact_dict: dict) -> list[str]:
     for sentence in _SENTENCE.split(text):
         if _QUALIFIED.search(sentence):
             continue  # claims about a particular stage or experiment are not checked here
+        if not _CLAIM.search(sentence) and re.search(r"experiment|runs?\b", sentence, re.IGNORECASE):
+            for m in _BARE.finditer(sentence):
+                n, verb = m.groups()
+                expected = failed if verb.lower() in ("failed", "crashed") else run - failed
+                if _count(n) != expected:
+                    issues.append(f"claims {n} {verb.lower()}, but {expected} of {run} experiments did")
         for m in _CLAIM.finditer(sentence):
             n, total_a, verb, total_b = m.groups()
             expected = failed if verb.lower() in ("failed", "crashed") else run - failed

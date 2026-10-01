@@ -1,4 +1,5 @@
 """Metrics and prediction-file validation. All scoring happens here, outside the sandbox."""
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -131,6 +132,7 @@ def combine_predictions(metric: Metric, folds: list[pd.Series]) -> pd.Series:
 _METRIC_RULES = [
     (("rmsle",), "rmsle"), (("root mean squared log",), "rmsle"),
     (("log", "rmse"), "rmsle"), (("log", "root mean squared"), "rmsle"),
+    (("log1p", "rmse"), "rmsle"), (("log1p", "root mean squared"), "rmsle"),
     (("log loss",), "log_loss"), (("logloss",), "log_loss"), (("cross entropy",), "log_loss"),
     (("pr auc",), "pr_auc"), (("pr_auc",), "pr_auc"), (("average precision",), "pr_auc"),
     (("precision-recall",), "pr_auc"),
@@ -144,14 +146,25 @@ _METRIC_RULES = [
 ]
 
 
+def _norm(text: str) -> str:
+    return " ".join(text.lower().replace("_", " ").replace("-", " ").replace("^", "").split())
+
+
+def _has(text: str, phrase: str) -> bool:
+    """Whole-word match, so "log" is not found in "catalog" or "auc" in "caucasian"."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(_norm(phrase))}(?![a-z0-9])", text) is not None
+
+
 def match_metric(text: str | None) -> str | None:
     """Map a free-text evaluation description to a metric name, or None if it is unclear."""
     if not text:
         return None
-    t = " ".join(text.lower().replace("_", " ").replace("-", " ").split())
+    t = _norm(text)
     if t.replace(" ", "_") in METRICS:
         return t.replace(" ", "_")
+    if _has(t, "mape") or _has(t, "percentage error"):
+        return None  # a different metric from MAE; let the planner choose or reject
     for words, name in _METRIC_RULES:
-        if all(w.replace("-", " ").replace("_", " ") in t for w in words):
+        if all(_has(t, w) for w in words):
             return name
     return None

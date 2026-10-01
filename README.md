@@ -94,8 +94,10 @@ data description are read and shown to the model. `--goal` states the problem in
 `--eval` says how to judge it, either as a metric name or in words ("RMSE between log prices").
 Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
 answer against the files. Tables that don't hold the target are made available to the generated
-code under `data/extra/` (read-only), so they can be joined in; a table that only repeats the
-training columns without the target is ignored. Everything you point at is copied into the run folder.
+code under `data/extra/` (read-only), so they can be joined in. A table that contains the target
+column is ignored, because the generated code could read the labels from it (combine such files
+into the training table first), and so is a table that only repeats the training columns without
+the target. Folders named `runs`, `hidden` or `mlruns` and earlier orbit runs are never copied. Everything you point at is copied into the run folder.
 URLs are fetched with the host's network access, so only use sources you trust.
 
 Metrics: `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`, `f1_macro`, `rmse`,

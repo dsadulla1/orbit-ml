@@ -90,6 +90,9 @@ def test_check_claims():
     assert check_claims("Three experiments failed entirely.", f) != []
     assert check_claims("Experiment 3 failed and one debug experiment succeeded.", f) == []
     assert check_claims("Nine experiments succeeded out of 12.", f) != []
+    assert check_claims("Across the runs, 7 succeeded and 3 failed.", f) != []
+    assert check_claims("Across the runs, 9 succeeded and 1 failed.", f) == []
+    assert check_claims("The model scored 7 failed predictions per batch.", f) == []
 
 
 def test_docker_command_is_locked_down():

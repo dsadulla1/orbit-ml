@@ -94,7 +94,10 @@ def test_combine_fold_predictions():
     ("ROC AUC", "roc_auc"), ("area under the roc curve", "roc_auc"), ("log loss", "log_loss"),
     ("PR-AUC", "pr_auc"), ("macro F1", "f1_macro"), ("balanced accuracy", "balanced_accuracy"),
     ("accuracy", "accuracy"), ("R^2", "r2"), ("f1_macro", "f1_macro"),
-    ("how happy customers are", None), ("", None), (None, None)])
+    ("how happy customers are", None), ("", None), (None, None),
+    ("RMSE on the catalog data", "rmse"), ("RMSE of the login dialog times", "rmse"),
+    ("caucasian cohort accuracy", "accuracy"), ("procedure score", None), ("car2 sales r2", "r2"),
+    ("mean absolute percentage error", None), ("MAPE", None), ("RMSE of log1p price", "rmsle")])
 def test_match_metric(text, expected):
     assert match_metric(text) == expected
 

@@ -16,6 +16,7 @@ from .task import Task, TaskSpec, prepare, profile
 app = typer.Typer(help="Autonomous ML experiments: an LLM proposes, a sandbox runs, orbit scores.",
                   no_args_is_help=True, add_completion=False)
 console = Console()
+TRACKERS = ("auto", "mlflow", "wandb", "none")
 
 
 @app.callback()
@@ -37,7 +38,11 @@ def _llm():
 def explore(data: Path = typer.Argument(..., exists=True, help="CSV file"),
             target: str = typer.Option(..., "--target", "-t")):
     """Print the dataset profile the agent will see."""
-    console.print(profile(pd.read_csv(data), target))
+    df = pd.read_csv(data)
+    if target not in df.columns:
+        raise typer.BadParameter(f"{target!r} not found. Columns: {list(df.columns)}",
+                                 param_hint="--target")
+    console.print(profile(df, target))
 
 
 @app.command()
@@ -61,6 +66,8 @@ def run(
     from .sandbox import DockerSandbox, check_docker
     from .tracking import make_tracker
 
+    if tracker not in TRACKERS:
+        raise typer.BadParameter(f"choose one of {', '.join(TRACKERS)}", param_hint="--tracker")
     sb_settings = SandboxSettings()
     ok, msg = check_docker(sb_settings)
     if not ok:

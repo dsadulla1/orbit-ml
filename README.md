@@ -125,6 +125,10 @@ All settings come from environment variables (or `.env` in the working directory
 
 `--tracker auto|mlflow|wandb|none` overrides the tracker choice per run.
 
+If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
+HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an
+outage costs seconds per experiment, not minutes; set those variables yourself to override.
+
 ## Querying runs from an AI assistant (MCP)
 
 MLflow ships an MCP server, so assistants such as Claude Code or Cursor can browse and

@@ -21,7 +21,7 @@ def mlflow_uri(tmp_path, monkeypatch):
 def test_mlflow_logs_parent_and_nested_runs(clf_csv, tmp_path, mlflow_uri):
     import mlflow
 
-    task = prepare(TaskSpec(str(clf_csv), "label"), tmp_path / "run")
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=1), tmp_path / "run")
     cfg = SearchConfig(max_steps=2, n_drafts=2)
     tracker = MLflowTracker(experiment="orbit-test")
     tracker.start(task, cfg, "scripted")
@@ -53,7 +53,7 @@ def test_mlflow_logs_parent_and_nested_runs(clf_csv, tmp_path, mlflow_uri):
 def test_mlflow_finish_closes_run_without_test_score(clf_csv, tmp_path, mlflow_uri):
     import mlflow
 
-    task = prepare(TaskSpec(str(clf_csv), "label"), tmp_path / "run")
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=1), tmp_path / "run")
     cfg = SearchConfig(max_steps=1, n_drafts=1)
     tracker = MLflowTracker(experiment="orbit-test")
     tracker.start(task, cfg, "scripted")

@@ -13,8 +13,8 @@ from orbit.task import TaskSpec, prepare
 from conftest import LocalSandbox, ScriptedLLM, clf_reply
 
 
-def _finished_run(tmp_path, csv):
-    task = prepare(TaskSpec(str(csv), "label"), tmp_path / "run")
+def _finished_run(tmp_path, csv, folds=1):
+    task = prepare(TaskSpec(str(csv), "label", folds=folds), tmp_path / "run")
     agent = Agent(task, ScriptedLLM([clf_reply(), clf_reply("RF", "ensemble",
                   "RandomForestClassifier", "random_state=0")]), LocalSandbox(),
                   SearchConfig(max_steps=2, n_drafts=2))
@@ -33,6 +33,14 @@ def test_template_report(clf_csv, tmp_path):
     assert "**Verdict:**" in md and "All numbers verified" in md
     assert f["best"]["test_score"] is not None
     assert check_numbers(md.split("## Summary")[1].split("_Narrative")[0], facts(task, journal)) == []
+
+
+def test_cross_validated_report_shows_spread(clf_csv, tmp_path):
+    task, journal = _finished_run(tmp_path, clf_csv, folds=3)
+    md, f = build(task, journal, llm=None)
+    assert f["validation"] == "mean of 3-fold cross-validation"
+    assert f["best"]["val_std_across_folds"] is not None
+    assert "3-fold cross-validation" in md and " ± " in md and "All numbers verified" in md
 
 
 def test_llm_narrative_flags_invented_numbers(clf_csv, tmp_path):

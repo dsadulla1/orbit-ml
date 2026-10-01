@@ -7,6 +7,7 @@
 """
 import json
 import re
+import statistics
 from pathlib import Path
 
 from .agent import Journal
@@ -22,6 +23,9 @@ NARRATOR_USER = """FACTS:
 {facts}
 ```
 
+The validation score is described by the "validation" field; when it is a cross-validation \
+mean, val_std_across_folds is its spread, and a gain smaller than that spread is within noise.
+
 Write at most 150 words of Markdown with exactly these bold labels, each followed by 1-3 sentences:
 **Verdict:** which experiment won and by how much over the baseline.
 **Evidence:** validation vs held-out test score, and how the search progressed.
@@ -31,6 +35,10 @@ Write at most 150 words of Markdown with exactly these bold labels, each followe
 
 def _r(x, nd=4):
     return None if x is None else round(float(x), nd)
+
+
+def _std(node):
+    return _r(statistics.stdev(node.fold_scores)) if len(node.fold_scores) > 1 else None
 
 
 def facts(task: Task, journal: Journal, top: int = 5) -> dict:
@@ -45,6 +53,8 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
         "target": task.spec.target,
         "metric": task.metric_name,
         "direction": "higher is better" if metric.greater_is_better else "lower is better",
+        "validation": (f"mean of {task.n_folds}-fold cross-validation" if task.n_folds > 1
+                       else "single validation split"),
         "baseline_val_score": _r(task.baseline),
         "experiments_run": len(journal.nodes),
         "experiments_failed": sum(n.buggy for n in journal.nodes),
@@ -60,6 +70,8 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
             "val_score": _r(best.metric), "test_score": _r(best.test_metric),
             "gain_over_baseline": _r(sign * (best.metric - task.baseline)),
         }
+        if _std(best) is not None:
+            out["best"]["val_std_across_folds"] = _std(best)
         if best.test_metric is not None:
             out["best"]["val_test_gap"] = _r(abs(best.metric - best.test_metric))
         if first_ok and first_ok.id != best.id:
@@ -69,7 +81,7 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
             out["runner_up"] = {"experiment": ranked[1].id, "val_score": _r(ranked[1].metric),
                                 "plan": ranked[1].plan}
     out["leaderboard"] = [{"experiment": n.id, "stage": n.stage, "val_score": _r(n.metric),
-                           "plan": n.plan[:160]} for n in ranked[:top]]
+                           "val_std": _std(n), "plan": n.plan[:160]} for n in ranked[:top]]
     return out
 
 
@@ -142,7 +154,8 @@ def leaderboard_md(f: dict) -> str:
     rows = ["| # | stage | val score | approach |", "|---|---|---|---|"]
     for r in f["leaderboard"]:
         plan = r["plan"].replace("|", "/")
-        rows.append(f"| {r['experiment']} | {r['stage']} | {r['val_score']} | {plan} |")
+        score = f"{r['val_score']} ± {r['val_std']}" if r.get("val_std") is not None else r["val_score"]
+        rows.append(f"| {r['experiment']} | {r['stage']} | {score} | {plan} |")
     return "\n".join(rows)
 
 
@@ -164,7 +177,7 @@ def build(task: Task, journal: Journal, llm=None) -> tuple[str, dict]:
           f"({f['direction']}). Stopped: {f['stop_reason']}.", "",
           "## Summary", "", narrative, "", f"_Narrative source: {source}. {check}_", ""]
     if best:
-        md += ["## Leaderboard (validation)", "", leaderboard_md(f), "",
+        md += [f"## Leaderboard ({f['validation']})", "", leaderboard_md(f), "",
                f"Best experiment code: `nodes/{best['experiment']:03d}/solution.py`", ""]
     md += ["## Run stats", "",
            f"- Experiments: {f['experiments_run']} ({f['experiments_failed']} failed, "

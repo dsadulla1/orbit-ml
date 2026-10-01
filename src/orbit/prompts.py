@@ -43,6 +43,7 @@ PLAN: <one to three sentences: what this experiment tries and why>
 DATA_SECTION = """## Task
 Goal: {goal}
 Metric: {metric} ({direction}). Baseline that ignores the features scores {baseline:.4f}.
+{scoring}
 
 ## Training data profile
 {profile}"""
@@ -106,8 +107,14 @@ def system_prompt(task, timeout: int, cpus: float) -> str:
 def data_section(task) -> str:
     direction = "higher is better" if task.metric.greater_is_better else "lower is better"
     goal = task.spec.goal or f"predict {task.spec.target!r} as accurately as possible"
+    scoring = ""
+    if task.n_folds > 1:
+        scoring = (f"Scoring: your script is run {task.n_folds} times, each on a different "
+                   f"train/test split of the same data (data/train.csv and data/test.csv change "
+                   f"between runs); the score is the mean over the runs. Do not hard-code row "
+                   f"counts or ids.")
     return DATA_SECTION.format(goal=goal, metric=task.metric_name, direction=direction,
-                               baseline=task.baseline, profile=task.profile)
+                               baseline=task.baseline, profile=task.profile, scoring=scoring)
 
 
 def history_section(nodes, max_items: int = 15) -> str:

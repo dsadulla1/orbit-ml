@@ -57,6 +57,8 @@ def run(
     minutes: float = typer.Option(60, help="Time budget for the whole search"),
     tokens: int = typer.Option(None, help="Optional LLM token budget"),
     drafts: int = typer.Option(3, help="Independent initial solutions before refining"),
+    folds: int = typer.Option(None, help="Cross-validation folds (default: 5 for small data, "
+                                          "otherwise 1 = a single validation split)"),
     timeout: int = typer.Option(None, help="Per-experiment time limit in seconds"),
     tracker: str = typer.Option("auto", help="auto | mlflow | wandb | none"),
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
@@ -76,15 +78,16 @@ def run(
     llm = _llm()
 
     run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{data.stem}"
-    task = prepare(TaskSpec(str(data), target, metric, goal, seed=seed), run_dir)
+    task = prepare(TaskSpec(str(data), target, metric, goal, folds=folds, seed=seed), run_dir)
     cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
                        n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
                        cpus=sb_settings.cpus, seed=seed)
     trk = make_tracker(tracker_choice(tracker))
     trk.start(task, cfg, llm.model)
 
+    scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
     console.print(f"[bold]orbit[/] {run_dir}  model={llm.model}  metric={task.metric_name}  "
-                  f"baseline={task.baseline:.4f}  tracker={trk.name}")
+                  f"baseline={task.baseline:.4f}  validation={scheme}  tracker={trk.name}")
 
     def on_node(node, agent):
         best = agent.best()

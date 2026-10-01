@@ -6,6 +6,7 @@ Tracking problems are reported but never abort a search.
 """
 import logging
 import os
+import statistics
 from pathlib import Path
 
 log = logging.getLogger("orbit")
@@ -60,6 +61,7 @@ class MLflowTracker:
             "metric": task.metric_name, "task_kind": task.kind, "llm_model": llm_model,
             "max_steps": config.max_steps, "n_drafts": config.n_drafts,
             "exec_timeout": config.exec_timeout, "seed": task.spec.seed,
+            "cv_folds": task.n_folds,
         })
         mlflow.log_metric("baseline", task.baseline)
         mlflow.log_text(task.profile, "data_profile.txt")
@@ -77,6 +79,9 @@ class MLflowTracker:
                        "completion_tokens": node.completion_tokens}
             if node.metric is not None:
                 metrics["val_score"] = node.metric
+            if len(node.fold_scores) > 1:
+                metrics["val_score_std"] = statistics.stdev(node.fold_scores)
+                metrics.update({f"val_score_fold_{k}": v for k, v in enumerate(node.fold_scores, 1)})
             mlflow.log_metrics(metrics)
             for name in ARTIFACTS:
                 if (workdir / name).exists():

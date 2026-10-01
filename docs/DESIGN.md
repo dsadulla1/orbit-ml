@@ -22,7 +22,9 @@
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
 | `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
-| `cli.py` | `explore`, `run`, `compare`, `summarize`, `doctor` |
+| `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
+| `html_report.py` | Standalone `report.html` (Jinja, inline SVG charts, no scripts or external assets) |
+| `cli.py` | `explore`, `run`, `results`, `compare`, `summarize`, `doctor` |
 
 ## Data flow and label hiding
 

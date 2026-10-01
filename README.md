@@ -68,6 +68,7 @@ Each run writes a folder under `runs/`:
 ```
 runs/20261001-120000-breast_cancer/
   report.md          summary, leaderboard, run stats
+  report.html        the same as one standalone page: charts, leaderboard, best script (open in a browser)
   journal.json       every experiment: stage, parent, plan, score, error, tokens
   task.json          metric, baseline, data profile
   input/             train.csv + unlabeled test.csv, or fold_1/ ... fold_k/ with cross-validation
@@ -81,6 +82,7 @@ runs/20261001-120000-breast_cancer/
 |---|---|
 | `orbit explore DATA -t TARGET` | Print the data profile the agent will see |
 | `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K]` | Solve a problem: run a search |
+| `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |

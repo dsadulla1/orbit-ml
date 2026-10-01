@@ -72,8 +72,10 @@ class DockerSandbox:
 
     def run(self, code: str, workdir: Path, data_dir: Path, timeout: int) -> ExecResult:
         workdir.mkdir(parents=True, exist_ok=True)
+        # Pre-create the mount point so Docker doesn't create it root-owned on the host.
+        (workdir / "data").mkdir(exist_ok=True)
         (workdir / SCRIPT).write_text(code, encoding="utf-8")
-        name = f"orbit-{uuid.uuid4().hex[:12]}"
+        name =f"orbit-{uuid.uuid4().hex[:12]}"
         start = time.monotonic()
         try:
             proc = subprocess.run(self.command(workdir, data_dir, name), capture_output=True,

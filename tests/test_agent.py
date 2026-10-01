@@ -98,3 +98,9 @@ def test_finalize_survives_unreadable_best_predictions(clf_csv, tmp_path):
     agent.finalize("done")
     assert agent.journal.best_id == node.id and node.test_metric is None
     assert Journal.load(agent.task.run_dir / "journal.json").stop_reason == "done"
+
+
+def test_cut_off_reply_is_reported(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, ["PLAN: x\n```python\nimport pandas as pd\nX = pd.read"],
+                      max_steps=1, n_drafts=1)
+    assert "cut off" in agent.run().nodes[0].error

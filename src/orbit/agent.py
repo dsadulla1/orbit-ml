@@ -149,7 +149,9 @@ class Agent:
         (workdir / "response.md").write_text(reply.text, encoding="utf-8")
 
         if node.code is None:
-            node.error = "The reply contained no ```python code block."
+            node.error = ("The reply was cut off inside a code block (output token limit?)."
+                          if reply.text.count("```") % 2 else
+                          "The reply contained no ```python code block.")
         else:
             result = self.sandbox.run(node.code, workdir, self.task.input_dir, self.cfg.exec_timeout)
             node.duration = result.duration

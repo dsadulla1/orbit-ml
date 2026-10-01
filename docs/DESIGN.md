@@ -70,8 +70,15 @@ some servers handle unreliably. `<think>` sections from reasoning models are str
   pandas 2 behaviour.
 - Optional `--runtime runsc` (gVisor) via `ORBIT_SANDBOX_RUNTIME`.
 
-Limits of this model: containers share the host kernel, and the orchestrator needs Docker
-daemon access, which is root-equivalent on the host.
+After each run, orbit deletes any symlinks the script left in its folder before reading or
+uploading anything from there. Logs are streamed to temp files outside the mount, and only the
+tail is kept. If orbit itself runs as root, experiments still run as the image's unprivileged
+user.
+
+Limits of this model: containers share the host kernel; the orchestrator needs Docker daemon
+access, which is root-equivalent on the host; the writable experiment folder has no disk quota
+(put `runs/` on a volume you can afford to fill); and `/dev/shm` keeps Docker's 64 MB default,
+which can constrain joblib's process-based parallelism.
 
 ## Reports and number verification
 

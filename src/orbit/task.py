@@ -121,6 +121,17 @@ def _baseline(metric: Metric, y_train: pd.Series, y_val: pd.Series, positive_lab
     return score(metric, y_val, preds, positive_label)
 
 
+def _split(df: pd.DataFrame, target: str, kind: str, size: float, seed: int):
+    """Stratified split for classification; plain split when a class is too rare to stratify."""
+    if kind == "classification":
+        try:
+            return train_test_split(df, test_size=size, stratify=df[target].astype(str),
+                                    random_state=seed)
+        except ValueError:
+            pass
+    return train_test_split(df, test_size=size, random_state=seed)
+
+
 def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     df = pd.read_csv(spec.data_path)
     if spec.target not in df.columns:
@@ -128,14 +139,20 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     if ID_COL in df.columns:
         raise ValueError(f"Column name {ID_COL!r} is reserved by orbit; please rename it.")
     df = df[df[spec.target].notna()].reset_index(drop=True)
-
     y = df[spec.target]
+    if pd.api.types.is_float_dtype(y) and (y == y.round()).all():
+        # Missing values make pandas read integer targets (e.g. 0/1) as floats; restore them.
+        df[spec.target] = y = y.astype("int64")
+
     kind = infer_kind(y)
     classes = sorted(map(str, y.unique())) if kind == "classification" else []
     metric_name = spec.metric or default_metric(kind, len(classes))
     if metric_name not in METRICS:
         raise ValueError(f"Unknown metric {metric_name!r}. Choose from {sorted(METRICS)}.")
     metric = METRICS[metric_name]
+    if metric.kind == "regression" and kind == "classification" and pd.api.types.is_numeric_dtype(y):
+        # An explicit regression metric overrides the guess for small-integer targets (ratings, counts).
+        kind, classes = "regression", []
     if metric.kind != kind:
         raise ValueError(f"Metric {metric_name!r} is for {metric.kind}, but the target looks like {kind}.")
     if metric.needs_proba and len(classes) != 2:
@@ -143,12 +160,9 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     # Positive class for probability metrics: the minority class (usually the event of interest).
     positive_label = str(y.astype(str).value_counts().idxmin()) if metric.needs_proba else None
 
-    strat = y.astype(str) if kind == "classification" else None
     holdout = spec.val_size + spec.test_size
-    train, rest = train_test_split(df, test_size=holdout, stratify=strat, random_state=spec.seed)
-    strat_rest = rest[spec.target].astype(str) if kind == "classification" else None
-    val, test = train_test_split(rest, test_size=spec.test_size / holdout,
-                                 stratify=strat_rest, random_state=spec.seed)
+    train, rest = _split(df, spec.target, kind, holdout, spec.seed)
+    val, test = _split(rest, spec.target, kind, spec.test_size / holdout, spec.seed)
 
     hidden = pd.concat([val.assign(_split="val"), test.assign(_split="test")])
     hidden = hidden.sample(frac=1.0, random_state=spec.seed).reset_index(drop=True)

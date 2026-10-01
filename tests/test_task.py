@@ -50,3 +50,32 @@ def test_rejects_bad_metric(clf_csv, tmp_path, metric, msg):
 def test_missing_target(clf_csv, tmp_path):
     with pytest.raises(ValueError, match="not found"):
         prepare(TaskSpec(str(clf_csv), "nope"), tmp_path / "run")
+
+
+def test_integer_target_with_missing_values_stays_classification(clf_csv, tmp_path):
+    df = pd.read_csv(clf_csv)
+    df["label"] = (df["label"] == "yes").astype(int).astype(float)
+    df.loc[:4, "label"] = None  # missing targets make pandas read 0/1 as 0.0/1.0
+    path = tmp_path / "missing.csv"
+    df.to_csv(path, index=False)
+    task = prepare(TaskSpec(str(path), "label"), tmp_path / "run")
+    assert task.kind == "classification" and task.metric_name == "roc_auc"
+    assert task.positive_label == "1" and task.classes == ["0", "1"]
+
+
+def test_regression_metric_overrides_small_integer_target(tmp_path):
+    df = pd.DataFrame({"x": range(200), "rating": [i % 5 + 1 for i in range(200)]})
+    path = tmp_path / "ratings.csv"
+    df.to_csv(path, index=False)
+    assert prepare(TaskSpec(str(path), "rating"), tmp_path / "a").kind == "classification"
+    task = prepare(TaskSpec(str(path), "rating", metric="mae"), tmp_path / "b")
+    assert task.kind == "regression" and task.classes == []
+
+
+def test_rare_class_does_not_break_split(clf_csv, tmp_path):
+    df = pd.read_csv(clf_csv)
+    df.loc[0, "label"] = "rare"  # a class with a single row cannot be stratified
+    path = tmp_path / "rare.csv"
+    df.to_csv(path, index=False)
+    task = prepare(TaskSpec(str(path), "label", metric="accuracy"), tmp_path / "run")
+    assert "rare" in task.classes

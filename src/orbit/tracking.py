@@ -126,7 +126,8 @@ class WandbTracker:
         self.run.log(data, step=node.id)
         self.rows.append([node.id, node.stage, node.parent, node.metric, node.plan])
         if (workdir / "solution.py").exists():
-            art = self.wandb.Artifact(f"exp-{node.id:03d}", type="code")
+            # Artifact names are project-wide, so scope them to this run.
+            art = self.wandb.Artifact(f"{self.run.id}-exp-{node.id:03d}", type="code")
             art.add_file(str(workdir / "solution.py"))
             self.run.log_artifact(art)
 

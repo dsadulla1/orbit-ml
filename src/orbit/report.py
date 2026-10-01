@@ -117,7 +117,8 @@ def template_narrative(f: dict) -> str:
     lines = [f"**Verdict:** experiment #{b['experiment']} ({b['stage']}) is best with "
              f"{f['metric']} {b['val_score']} on validation vs a baseline of "
              f"{f['baseline_val_score']} (gain {b['gain_over_baseline']})."]
-    ev = f"**Evidence:** held-out test score {b['test_score']}"
+    ev = ("**Evidence:** held-out test score "
+          + (str(b["test_score"]) if b["test_score"] is not None else "unavailable"))
     if "gain_from_search" in f:
         ev += (f"; search improved on the first working experiment "
                f"(#{f['first_working']['experiment']}, {f['first_working']['val_score']}) "

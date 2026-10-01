@@ -5,6 +5,7 @@ W&B:    one run per orbit run; experiments are logged as steps plus a summary ta
 Tracking problems are reported but never abort a search.
 """
 import logging
+import os
 from pathlib import Path
 
 log = logging.getLogger("orbit")
@@ -34,6 +35,7 @@ class MLflowTracker:
     name = "mlflow"
 
     def __init__(self, experiment: str = "orbit"):
+        os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")  # quiet import-time banner
         import mlflow
         self.mlflow = mlflow
         self.experiment = experiment

@@ -21,7 +21,7 @@
 | `metrics.py` | Prediction-file validation, scoring and eval-wording matching (orchestrator side only; metrics come from a fixed registry, never from generated code) |
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
-| `report.py` | Facts → narrative → number verification → `report.md` |
+| `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
 | `cli.py` | `explore`, `run`, `compare`, `summarize`, `doctor` |
 
 ## Data flow and label hiding
@@ -98,8 +98,11 @@ validation and test scores, gain over the baseline and over the first working ex
 runner-up, failure and debug counts, and time and tokens. The LLM is asked to write a
 150-word narrative using only those facts. `check_numbers()` then extracts every number in the
 narrative and checks that it matches a fact at the precision written (percentages are checked
-against fractions too). Unmatched numbers are flagged in the report. Without an LLM, a
-deterministic template produces the same structure.
+against fractions too), and `check_claims()` checks written counts of succeeded and failed
+experiments ("only one experiment succeeded out of ten") against the run. A narrative with any
+problem goes back to the LLM once with the problems listed; if the revision still fails review,
+the deterministic template is used instead, and the report says which happened. Without an LLM,
+the template produces the same structure.
 
 ## Tracking
 

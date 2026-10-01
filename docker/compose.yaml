@@ -49,8 +49,8 @@ services:
   # Local OpenAI-compatible LLM server (optional). Sized for 2-3 x 12 GB Ampere GPUs.
   # The endpoint is unauthenticated, so it is published on 127.0.0.1 only.
   vllm:
-    # Pin a tested release (e.g. v0.30.0) rather than tracking latest.
-    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-latest}
+    # Pinned to a tested release; `latest` moves and is often a stale local copy.
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-v0.29.0}
     profiles: ["local-llm"]
     # The image entrypoint is `vllm serve`; these are its arguments.
     # Single-GPU fallback: VLLM_MODEL=Qwen/Qwen2.5-Coder-14B-Instruct-AWQ, VLLM_TP=1,

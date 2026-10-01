@@ -117,13 +117,21 @@ def _one_line(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-_CODE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_PLAN = re.compile(r"PLAN:\s*(.*?)(?:```|$)", re.DOTALL | re.IGNORECASE)
+_PLAN = re.compile(r"PLAN\**\s*:\**\s*(.*?)(?:```|$)", re.DOTALL | re.IGNORECASE)
+_PYTHON = ("", "python", "py", "python3")
 
 
 def parse_response(text: str) -> tuple[str, str | None]:
     """Return (plan, code). Picks the longest fenced block if the model sent several."""
-    blocks = _CODE.findall(text)
+    text = text.replace("\r\n", "\n")
+    blocks = []
+    # Pair fences in order, so a closing fence is never mistaken for an opening one;
+    # blocks in other languages (```bash, ```text) and an unterminated last fence are skipped.
+    for part in text.split("```")[1:-1:2]:
+        header, _, body = part.partition("\n")
+        lang = header.split()[0].lower() if header.split() else ""
+        if lang in _PYTHON and body.strip():
+            blocks.append(body)
     code = max(blocks, key=len).strip() if blocks else None
     m = _PLAN.search(text)
     plan = m.group(1).strip() if m else text.split("```")[0].strip()

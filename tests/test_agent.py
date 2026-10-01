@@ -1,3 +1,5 @@
+import pandas as pd
+
 from orbit.agent import Agent, Journal, SearchConfig
 from orbit.task import TaskSpec, prepare
 
@@ -72,3 +74,27 @@ def test_llm_errors_abort_gracefully(clf_csv, tmp_path, monkeypatch):
     monkeypatch.setattr("orbit.agent.time.sleep", lambda s: None)
     journal = agent.run()
     assert "ConnectionError" in journal.stop_reason and journal.nodes == []
+
+
+def test_invalid_test_rows_rejected_during_search(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, [], max_steps=1, n_drafts=1)
+    labels = pd.read_csv(agent.task.run_dir / "hidden" / "labels.csv")
+    test_id = int(labels.loc[labels["split"] == "test", "orbit_id"].iloc[0])
+    # Valid on every validation row, out of range on one test row.
+    reply = clf_reply().replace(
+        'pd.DataFrame({"orbit_id"',
+        f'proba[test["orbit_id"].to_numpy() == {test_id}] = 7.0\npd.DataFrame({{"orbit_id"'
+    )
+    agent.llm.replies = [reply]
+    journal = agent.run()  # must not crash in finalize
+    assert journal.nodes[0].buggy and "probabilities" in journal.nodes[0].error
+    assert journal.best_id is None
+
+
+def test_finalize_survives_unreadable_best_predictions(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, [clf_reply()], max_steps=1, n_drafts=1)
+    node = agent.step()
+    (agent.task.run_dir / "nodes" / "001" / "predictions.csv").unlink()
+    agent.finalize("done")
+    assert agent.journal.best_id == node.id and node.test_metric is None
+    assert Journal.load(agent.task.run_dir / "journal.json").stop_reason == "done"

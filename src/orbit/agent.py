@@ -6,6 +6,7 @@ Every node is one experiment (a script + its official score). Each step picks on
   improve  make one focused change to the best node (occasionally a runner-up, to explore)
 """
 import json
+import logging
 import random
 import time
 from dataclasses import asdict, dataclass, field
@@ -14,11 +15,12 @@ from typing import Callable
 
 from . import prompts
 from .llm import LLM
-from .metrics import InvalidPredictions, read_predictions, score
+from .metrics import InvalidPredictions, check_values, read_predictions, score
 from .sandbox import ExecResult, Sandbox
 from .task import Task
 
 ERROR_CHARS = 4_000
+log = logging.getLogger("orbit")
 
 
 @dataclass
@@ -171,6 +173,8 @@ class Agent:
         try:
             val = self.task.labels("val")
             preds = read_predictions(workdir / "predictions.csv", self._all_ids())
+            # Check test rows too, so the final test scoring cannot fail on them.
+            check_values(self.task.metric, preds, self.task.positive_label)
             node.metric = score(self.task.metric, val, preds.loc[val.index], self.task.positive_label)
         except InvalidPredictions as e:
             node.error = f"Script ran but its output was rejected: {e}"
@@ -222,9 +226,12 @@ class Agent:
         if best:
             test = self.task.labels("test")
             workdir = self.task.run_dir / "nodes" / f"{best.id:03d}"
-            preds = read_predictions(workdir / "predictions.csv", self._all_ids())
-            best.test_metric = score(self.task.metric, test, preds.loc[test.index],
-                                     self.task.positive_label)
+            try:
+                preds = read_predictions(workdir / "predictions.csv", self._all_ids())
+                best.test_metric = score(self.task.metric, test, preds.loc[test.index],
+                                         self.task.positive_label)
+            except Exception as e:  # noqa: BLE001 - still save the journal and the report
+                log.warning("could not score experiment #%s on the test split: %s", best.id, e)
             j.best_id = best.id
         j.save(self.task.run_dir / "journal.json")
         if self.tracker:

@@ -65,19 +65,40 @@ def read_predictions(path, expected_ids: pd.Index) -> pd.Series:
     return preds
 
 
-def score(metric: Metric, y_true: pd.Series, preds: pd.Series, positive_label=None) -> float:
+def check_values(metric: Metric, preds: pd.Series, positive_label=None) -> pd.Series:
+    """Validate prediction values for `metric`; returns them as numbers where it needs numbers."""
     if metric.needs_proba:
         p = pd.to_numeric(preds, errors="coerce")
         if p.isna().any() or (p < 0).any() or (p > 1).any():
             raise InvalidPredictions(
                 f"{metric.name} needs probabilities in [0, 1] for class {positive_label!r}.")
+        return p
+    if metric.kind == "classification":
+        return preds
+    p = pd.to_numeric(preds, errors="coerce")
+    if p.isna().any():
+        raise InvalidPredictions("Regression predictions must be numeric.")
+    if not np.isfinite(p).all():
+        raise InvalidPredictions("Regression predictions must be finite (no inf).")
+    return p
+
+
+def _labels(s: pd.Series) -> pd.Series:
+    """Class labels as strings, so 1, 1.0 and "1" match after CSV round trips."""
+    if not pd.api.types.is_bool_dtype(s):
+        num = pd.to_numeric(s, errors="coerce")
+        if num.notna().all() and (num == num.round()).all():
+            return num.astype("int64").astype(str)
+    return s.astype(str)
+
+
+def score(metric: Metric, y_true: pd.Series, preds: pd.Series, positive_label=None) -> float:
+    p = check_values(metric, preds, positive_label)
+    if metric.needs_proba:
         y = (y_true.astype(str) == str(positive_label)).astype(int)
         if metric.name == "log_loss":
             return float(metric.fn(y, np.clip(p, 1e-15, 1 - 1e-15), labels=[0, 1]))
         return float(metric.fn(y, p))
     if metric.kind == "classification":
-        return float(metric.fn(y_true.astype(str), preds.astype(str)))
-    p = pd.to_numeric(preds, errors="coerce")
-    if p.isna().any():
-        raise InvalidPredictions("Regression predictions must be numeric.")
+        return float(metric.fn(_labels(y_true), _labels(p)))
     return float(metric.fn(y_true.astype(float), p))

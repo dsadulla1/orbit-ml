@@ -45,3 +45,27 @@ def test_parse_response_variants():
 
     plan, code = parse_response("PLAN: no code at all")
     assert code is None and plan == "no code at all"
+
+
+def test_parse_response_messy_output():
+    # A non-Python block before the script must not swallow the script's opening fence.
+    plan, code = parse_response("PLAN: x\n```bash\npip install foo\n```\n\n```python\nprint(1)\n```")
+    assert code == "print(1)"
+    plan, code = parse_response("PLAN: Try RF.\r\n```Python\r\nprint(1)\r\n```\r\nDone.")
+    assert plan == "Try RF." and code.strip() == "print(1)"
+    plan, code = parse_response("**PLAN:** Use RF.\n```python\nprint(1)\n```")
+    assert plan == "Use RF."
+    assert parse_response("PLAN: empty\n```python\n```")[1] is None
+
+
+def test_score_compares_labels_across_csv_types():
+    acc = METRICS["accuracy"]
+    assert score(acc, pd.Series([0, 1, 1]), pd.Series([0.0, 1.0, 1.0])) == 1.0
+    assert score(acc, pd.Series([0, 1, 1]), pd.Series(["0.0", "1", "1"])) == 1.0
+    assert score(acc, pd.Series([True, False]), pd.Series(["True", "False"])) == 1.0
+    assert score(acc, pd.Series(["a", "b"]), pd.Series(["a", "a"])) == 0.5
+
+
+def test_score_rejects_non_finite_regression():
+    with pytest.raises(InvalidPredictions, match="finite"):
+        score(METRICS["rmse"], pd.Series([1.0, 2.0]), pd.Series([float("inf"), 1.0]))

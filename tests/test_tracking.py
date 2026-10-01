@@ -9,6 +9,7 @@ from conftest import BROKEN, LocalSandbox, ScriptedLLM, clf_reply
 
 @pytest.fixture
 def mlflow_uri(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # artifacts default to ./mlruns; keep them out of the repo
     uri = f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}"
     monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
     import mlflow

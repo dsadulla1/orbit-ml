@@ -155,7 +155,24 @@ def doctor():
         console.print(f"  [red]failed[/] {type(e).__name__}: {str(e)[:200]}")
     ok, msg = check_docker()
     console.print(f"Sandbox: [{'green' if ok else 'red'}]{'ok' if ok else 'failed'}[/] {msg}")
-    console.print(f"Tracker (auto): {tracker_choice('auto')}")
+    tracker = tracker_choice("auto")
+    console.print(f"Tracker (auto): {tracker}")
+    if tracker == "mlflow":
+        console.print(f"  {_check_mlflow()}")
+
+
+def _check_mlflow() -> str:
+    import os
+    import urllib.request
+
+    uri = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not uri.startswith("http"):
+        return f"[green]ok[/] local store ({uri or 'MLflow default'})"
+    try:
+        urllib.request.urlopen(uri.rstrip("/") + "/health", timeout=5)
+        return f"[green]ok[/] server reachable at {uri}"
+    except Exception as e:  # noqa: BLE001
+        return f"[red]failed[/] {uri}: {e} (start it: docker compose --env-file .env -f docker/compose.yaml up -d mlflow)"
 
 
 if __name__ == "__main__":

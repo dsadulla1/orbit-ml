@@ -16,7 +16,7 @@ which unlabeled rows are validation (used to rank experiments during search) and
 (scored once, for the final best experiment, from the average of the k fold predictions).
 """
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +24,7 @@ import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from .metrics import ID_COL, METRICS, Metric, score
+from .planner import describe_table, read_docs, read_table
 
 MAX_CLASSES = 30
 AUTO_FOLDS = 5
@@ -40,6 +41,12 @@ class TaskSpec:
     test_size: float = 0.2
     folds: int | None = None  # None: 5-fold CV for small datasets, one split otherwise; 1: one split
     seed: int = 42
+    sources: list[str] = field(default_factory=list)  # what the user pointed at (files, dirs, URLs)
+    eval_text: str | None = None                      # the evaluation wording the user gave
+    extras: list[str] = field(default_factory=list)   # additional tables, readable under data/extra/
+    docs: list[str] = field(default_factory=list)     # documentation files shown to the model
+    id_column: str | None = None                      # identifies rows; not a feature
+    notes: list[str] = field(default_factory=list)    # how the task was set up
 
 
 @dataclass
@@ -54,6 +61,8 @@ class Task:
     profile: str
     baseline: float
     n_folds: int = 1
+    extra_profile: str = ""   # description of the additional tables
+    docs_text: str = ""       # documentation shown to the model
 
     @property
     def metric(self) -> Metric:
@@ -159,7 +168,7 @@ def _split(df: pd.DataFrame, target: str, kind: str, size: float, seed: int):
 
 
 def prepare(spec: TaskSpec, run_dir: Path) -> Task:
-    df = pd.read_csv(spec.data_path)
+    df = read_table(Path(spec.data_path))
     if spec.target not in df.columns:
         raise ValueError(f"Target column {spec.target!r} not found. Columns: {list(df.columns)}")
     if ID_COL in df.columns:
@@ -224,11 +233,15 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         columns={"_split": "split", "_fold": "fold", spec.target: "target"}
     ).to_csv(run_dir / "hidden" / "labels.csv", index=False)
 
+    extras = _read_extras(spec.extras)
     baselines = []
     for k, (train_k, val_k, _) in enumerate(parts, 1):
         out = run_dir / "input" if n_folds == 1 else run_dir / "input" / f"fold_{k}"
         out.mkdir(parents=True, exist_ok=True)
         train_k.to_csv(out / "train.csv", index=False)
+        for name, frame in extras.items():
+            (out / "extra").mkdir(exist_ok=True)
+            frame.to_csv(out / "extra" / f"{name}.csv", index=False)
         ids = hidden[(hidden["_fold"] == (1 if n_folds == 1 else k)) & (hidden["_split"] == "val")
                      | (hidden["_split"] == "test")]
         ids.sample(frac=1.0, random_state=spec.seed + k)[[ID_COL] + features].to_csv(
@@ -240,9 +253,22 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         positive_label=positive_label, classes=classes, n_train=len(parts[0][0]),
         profile=profile(profile_df, spec.target), baseline=float(np.mean(baselines)),
         n_folds=n_folds,
+        extra_profile="\n\n".join(describe_table(Path(n), f, title=f"data/extra/{n}.csv") for n, f in extras.items()),
+        docs_text=read_docs([Path(p) for p in spec.docs]),
     )
     task.save()
     return task
+
+
+def _read_extras(paths: list[str]) -> dict[str, pd.DataFrame]:
+    """Additional tables by the file name they get under data/extra/ (always plain CSV)."""
+    out = {}
+    for p in map(Path, paths):
+        name = p.name.split(".")[0] or "table"
+        while name in out:
+            name += "_2"
+        out[name] = read_table(p)
+    return out
 
 
 def _folds(df: pd.DataFrame, target: str, kind: str, n: int, seed: int):

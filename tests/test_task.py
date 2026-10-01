@@ -112,3 +112,30 @@ def test_too_few_rows_for_folds(tmp_path):
     pd.DataFrame({"x": range(12), "label": [0, 1] * 6}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="cross-validation"):
         prepare(TaskSpec(str(path), "label", folds=10), tmp_path / "run")
+
+
+def test_extra_tables_docs_and_id_column_reach_the_sandbox_and_prompt(clf_csv, tmp_path):
+    from orbit.prompts import data_section
+
+    extra = tmp_path / "lookup.tsv"
+    pd.DataFrame({"f0": [0.0, 1.0], "region": ["n", "s"]}).to_csv(extra, sep="\t", index=False)
+    doc = tmp_path / "about.txt"
+    doc.write_text("f0 is the first sensor reading.")
+    spec = TaskSpec(str(clf_csv), "label", folds=2, extras=[str(extra)], docs=[str(doc)], id_column="f1",
+                    goal="Flag the positives", eval_text="ROC AUC")
+    task = prepare(spec, tmp_path / "run")
+    for k in (1, 2):
+        assert pd.read_csv(task.fold_dir(k) / "extra" / "lookup.csv")["region"].tolist() == ["n", "s"]
+    text = data_section(task)
+    assert "data/extra/lookup.csv" in text and "region" in text
+    assert "first sensor reading" in text and "'f1' only identifies rows" in text
+    loaded = Task.load(task.run_dir)
+    assert loaded.spec.extras == [str(extra)] and loaded.spec.eval_text == "ROC AUC"
+    single = prepare(TaskSpec(str(clf_csv), "label", folds=1, extras=[str(extra)]), tmp_path / "one")
+    assert (single.input_dir / "extra" / "lookup.csv").exists()
+
+
+def test_tab_separated_primary_table(tmp_path):
+    path = tmp_path / "t.tsv"
+    pd.DataFrame({"x": range(60), "label": ["a", "b"] * 30}).to_csv(path, sep="\t", index=False)
+    assert prepare(TaskSpec(str(path), "label", folds=1), tmp_path / "run").kind == "classification"

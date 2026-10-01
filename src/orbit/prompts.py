@@ -46,7 +46,7 @@ Metric: {metric} ({direction}). Baseline that ignores the features scores {basel
 {scoring}
 
 ## Training data profile
-{profile}"""
+{profile}{extras}"""
 
 HISTORY_SECTION = """## Experiments so far (official validation scores)
 {history}"""
@@ -113,8 +113,18 @@ def data_section(task) -> str:
                    f"train/test split of the same data (data/train.csv and data/test.csv change "
                    f"between runs); the score is the mean over the runs. Do not hard-code row "
                    f"counts or ids.")
+    extras = ""
+    if task.spec.id_column:
+        extras += (f"\n\nColumn {task.spec.id_column!r} only identifies rows; do not use it as a "
+                   f"feature.")
+    if task.extra_profile:
+        extras += ("\n\n## Additional tables (read-only CSV files under data/extra/; join them to "
+                   "the training data when they help)\n" + task.extra_profile)
+    if task.docs_text:
+        extras += "\n\n## Documentation supplied with the data\n" + task.docs_text
     return DATA_SECTION.format(goal=goal, metric=task.metric_name, direction=direction,
-                               baseline=task.baseline, profile=task.profile, scoring=scoring)
+                               baseline=task.baseline, profile=task.profile, scoring=scoring,
+                               extras=extras)
 
 
 def history_section(nodes, max_items: int = 15) -> str:

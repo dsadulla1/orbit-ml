@@ -70,8 +70,8 @@ def read_table(path: Path, nrows: int | None = None) -> pd.DataFrame:
     return pd.read_csv(path, sep=sep, nrows=nrows)
 
 
-def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40) -> str:
-    lines = [f"### {path.name}  ({len(df):,}{'+' if len(df) >= PROFILE_ROWS else ''} rows, "
+def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40, title: str | None = None) -> str:
+    lines = [f"### {title or path.name}  ({len(df):,}{'+' if len(df) >= PROFILE_ROWS else ''} rows, "
              f"{df.shape[1]} columns)", "column | dtype | missing% | example values"]
     for c in list(df.columns)[:max_cols]:
         s = df[c]

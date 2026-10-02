@@ -43,6 +43,10 @@ flowchart LR
 - **Any model.** orbit uses plain chat completions (a plan plus one Python code block), so it works
   with OpenAI, a local [vLLM](https://docs.vllm.ai) server, Ollama, or any other
   OpenAI-compatible endpoint. No tool-calling support is required.
+- **Reusable model.** `orbit.export.export_best` refits the best approach on all labeled rows and
+  saves one pickled scikit-learn pipeline that takes raw feature rows. Each model is checked
+  with an allow-list scan of the pickle and by reloading it in the sandbox and reproducing its
+  predictions; see [Model export](docs/DESIGN.md#model-export).
 - **Traceable.** Each experiment keeps its prompt, response, script, stdout/stderr and score,
   in the run folder and in the tracker.
 

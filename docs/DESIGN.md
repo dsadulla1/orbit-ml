@@ -15,12 +15,14 @@
 | `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry |
 | `problem.py` | Resolve sources, plan, and prepare the task in one call |
 | `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
-| `helpers.py` | Optional helper for generated scripts, copied into every sandbox input directory as `orbit_helpers.py` (numpy and pandas only): consistent text encoding, NaN-filled frames, validated `predictions.csv` |
-| `prompts.py` | System prompt (sandbox contract), draft/improve/debug templates, response parsing |
+| `helpers.py` | Optional helper for generated scripts, copied into every sandbox input directory as `orbit_helpers.py` (numpy and pandas only): consistent text encoding, NaN-filled frames, validated `predictions.csv`, and `Preprocessor`, a scikit-learn transformer that lets an exported pipeline take raw rows |
+| `prompts.py` | System prompt (sandbox contract), draft/improve/debug/export templates, response parsing |
 | `llm.py` | Chat-completions client for any OpenAI-compatible endpoint |
 | `sandbox.py` | One locked-down `docker run` per experiment |
 | `metrics.py` | Prediction-file validation, scoring and eval-wording matching (orchestrator side only; metrics come from a fixed registry, never from generated code) |
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
+| `export.py` | Refit the best experiment on all labeled rows, save one pickled model, verify it by reloading it in the sandbox |
+| `pickle_scan.py` | Allow-list scan of a pickle stream (no unpickling) run before an exported model is loaded |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
 | `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
 | `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
@@ -122,6 +124,36 @@ Limits of this model: containers share the host kernel; the orchestrator needs D
 access, which is root-equivalent on the host; the writable experiment folder has no disk quota
 (put `runs/` on a volume you can afford to fill); and `/dev/shm` keeps Docker's 64 MB default,
 which can constrain joblib's process-based parallelism.
+
+## Model export
+
+`export.export_best` turns the best experiment into one reusable model, after scoring is done.
+`task.prepare_export_input` writes `runs/<id>/export/input/`: `train.csv` with every labeled row of
+the primary table (read again from the user's source file, never from `hidden/`), `test.csv` with
+up to 200 of those rows as features only plus `orbit_id`, the extra tables, `orbit_meta.json` and
+`orbit_helpers.py`. These rows include former validation and test rows; that is fine because
+scoring has finished and the labels come from the user's own file.
+
+The LLM rewrites the best script so that it trains on all rows and builds one scikit-learn
+`Pipeline` (or estimator) that takes raw feature rows and does its own preprocessing
+(`orbit_helpers.Preprocessor` handles text encoding and imputation), pickles it with plain
+`pickle` (protocol 4; joblib files are not supported) and writes `predictions.csv` for the check
+rows. Each attempt (up to three, later ones see the previous script and error) is accepted only if:
+
+1. the script exits cleanly and writes a regular `model.pkl` of at most 500 MB and valid predictions;
+2. `pickle_scan.scan` finds no disallowed global in the file. It walks the opcodes without
+   unpickling and allows only numpy, pandas, scipy, scikit-learn, LightGBM, XGBoost, joblib,
+   `orbit_helpers` and a few standard-library constructors, minus names that read files or run
+   code. This is defence in depth, not a guarantee: a pickle is code, and an allow-listed library
+   may still contain a harmful callable. The real boundary is that the model is only ever loaded in
+   a dedicated container;
+3. an orbit-written verifier, run in a fresh sandbox container, loads `model.pkl`, predicts the raw
+   check rows and reproduces the script's `predictions.csv` (`rtol=1e-5` for numbers, equal labels
+   for class predictions). This shows the saved object works from raw rows and is not in-memory state.
+
+The accepted model is copied to `export/model.pkl` next to `sample_input.csv`,
+`sample_predictions.csv` and `export.json` (outcome and attempt notes, no code or data). Export
+problems never raise: the result carries `ok=False` and a reason.
 
 ## Reports and number verification
 

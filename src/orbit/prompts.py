@@ -24,10 +24,13 @@ verbose=-1 in the params or constructor.
 XGBoost takes early_stopping_rounds in the estimator's constructor, not in fit().
   * RMSE: sklearn.metrics.root_mean_squared_error (mean_squared_error has no squared= argument).
   * Format numbers with f-strings like f"{{score:.4f}}"; never mix f-strings with .format().
-- Text columns must be encoded before use with scikit-learn, XGBoost or LightGBM (ordinal, one-hot or \
-target encoding fitted on the training rows only; LightGBM also accepts the pandas category dtype). \
-Missing values exist unless the profile says 0%: impute them, or use a model that accepts NaN \
-(LightGBM, XGBoost, HistGradientBoosting); Ridge and LogisticRegression reject NaN.
+- Text columns (marked TEXT in the profile) must be encoded before use with scikit-learn, XGBoost or \
+LightGBM: ordinal or one-hot encoding, or the pandas category dtype for LightGBM and XGBoost. Build the \
+category lists and encoders from the features of data/train.csv and data/test.csv together (never from \
+labels), so a value that appears only in data/test.csv, such as a rare country, cannot crash the script. \
+Target encoding may only use training labels. Missing values exist unless the profile says 0%: impute \
+them, or use a model that accepts NaN (LightGBM, XGBoost, HistGradientBoosting); Ridge and \
+LogisticRegression reject NaN.
 - Read training data from data/train.csv (features + target column {target!r}).
 - Read data/test.csv (features + an {id_col!r} column, no labels) and predict EVERY row.
 - Write predictions.csv in the current directory with exactly two columns: {id_col!r}, {pred_col!r}.
@@ -89,7 +92,7 @@ PLAN: {plan}
 ```
 {error}
 ```
-
+{earlier}
 Fix the root cause while keeping the experiment's intent, and check the rest of the script for \
 the same mistake. Do not repeat a fix that has already failed; if unsure, switch to a simpler \
 approach. Return the full corrected script."""

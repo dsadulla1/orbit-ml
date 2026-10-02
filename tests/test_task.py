@@ -357,3 +357,12 @@ def test_time_column_is_mentioned_in_prompt_and_report(tmp_path, folds):
                     else "single split ordered by when")
     plain = prepare(TaskSpec(str(path), "label", folds=folds), tmp_path / "plain")
     assert "later in time" not in prompts.data_section(plain)
+
+
+def test_profile_flags_text_columns(tmp_path):
+    path = tmp_path / "mixed.csv"
+    pd.DataFrame({"n": range(40), "country": ["UK", "FR"] * 20, "flag": [True, False] * 20,
+                  "y": [0.5 * i for i in range(40)]}).to_csv(path, index=False)
+    text = prepare(TaskSpec(str(path), "y", folds=1), tmp_path / "run").profile
+    line = {ln.split(" | ")[0]: ln for ln in text.splitlines() if " | " in ln}
+    assert "TEXT: encode" in line["country"] and "TEXT" not in line["n"] and "TEXT" not in line["flag"]

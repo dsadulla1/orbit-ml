@@ -116,7 +116,8 @@ def test_rmsle_and_new_classification_metrics():
 def test_prompts_cover_the_common_crashes():
     text = SYSTEM.format(libraries="numpy", target="y", id_col="orbit_id", pred_col="prediction",
                          prediction_rule="rule", timeout=60, cpus=2)
-    assert "Text columns must be encoded" in text and "Missing values exist" in text
+    assert "must be encoded" in text and "Missing values exist" in text
+    assert "data/train.csv and data/test.csv together" in text
     from orbit.prompts import DEBUG
     assert "Do not repeat a fix" in DEBUG
 

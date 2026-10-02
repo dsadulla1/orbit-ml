@@ -139,7 +139,19 @@ class Agent:
             return prompts.IMPROVE.format(data=data, history=history, node_id=parent.id,
                                           score=parent.metric, plan=parent.plan, code=parent.code)
         return prompts.DEBUG.format(data=data, node_id=parent.id, plan=parent.plan,
-                                    code=parent.code, error=parent.error)
+                                    code=parent.code, error=parent.error,
+                                    earlier=self._earlier_failures(parent))
+
+    def _earlier_failures(self, node: Node) -> str:
+        """Last error line of each earlier attempt in this debug chain, so a fix is not repeated."""
+        lines = []
+        while node.stage == "debug" and node.parent:
+            node = self.journal.get(node.parent)
+            last = [ln for ln in (node.error or "").strip().splitlines() if ln.strip()]
+            lines.append(f"- #{node.id}: {last[-1][:200] if last else 'failed'}")
+        if not lines:
+            return ""
+        return "\n## Earlier attempts in this chain failed with\n" + "\n".join(lines) + "\n"
 
     # ---- one experiment -----------------------------------------------------------------
     def step(self) -> Node:

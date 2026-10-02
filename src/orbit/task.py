@@ -134,6 +134,8 @@ def profile(df: pd.DataFrame, target: str, max_cols: int = 60) -> str:
         s = df[c]
         examples = ", ".join(map(str, s.dropna().unique()[:4]))
         tag = "  <- TARGET" if c == target else ""
+        if c != target and not (pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s)):
+            tag = "  <- TEXT: encode before modelling"
         lines.append(f"{c} | {s.dtype} | {100 * s.isna().mean():.1f} | {s.nunique()} | "
                      f"{examples[:80]}{tag}")
     if df.shape[1] - 1 > max_cols:

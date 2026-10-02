@@ -227,3 +227,17 @@ def test_search_stops_when_scores_stall(clf_csv, tmp_path):
     assert len(journal.nodes) == 3        # one improvement, then two identical scores
     assert journal.stop_reason == "no improvement beyond the fold spread in the last 2 experiments"
     assert journal.nodes[journal.best_id - 1].test_metric is not None
+
+
+def test_debug_prompt_lists_earlier_failures_of_the_chain(clf_csv, tmp_path):
+    from orbit.agent import Node
+
+    agent, _ = _agent(tmp_path, clf_csv, [])
+    first = Node(1, "draft", None, code="a", error="Traceback\nKeyError: 'country'")
+    second = Node(2, "debug", 1, code="b", error="Traceback\nValueError: could not convert string to float",
+                  debug_depth=1)
+    agent.journal.nodes = [first, second]
+    prompt = agent.build_prompt("debug", second)
+    assert "Earlier attempts in this chain failed with" in prompt and "#1: KeyError: 'country'" in prompt
+    assert "could not convert string to float" in prompt
+    assert "Earlier attempts" not in agent.build_prompt("debug", first)  # nothing earlier to list

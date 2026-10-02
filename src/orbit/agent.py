@@ -11,6 +11,7 @@ import math
 import random
 import statistics
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -21,9 +22,17 @@ from .metrics import (InvalidPredictions, check_values, combine_predictions, rea
                       score)
 from .sandbox import SCRIPT, ExecResult, Sandbox
 from .task import Task
+from .tracking import NO_SPAN
 
 ERROR_CHARS = 4_000
+SPAN_ERROR_CHARS = 300
 log = logging.getLogger("orbit")
+
+
+def _error_line(text: str | None) -> str | None:
+    """Last non-empty line of an error text, for span attributes."""
+    lines = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
+    return lines[-1][:SPAN_ERROR_CHARS] if lines else None
 
 
 @dataclass
@@ -154,13 +163,35 @@ class Agent:
         return "\n## Earlier attempts in this chain failed with\n" + "\n".join(lines) + "\n"
 
     # ---- one experiment -----------------------------------------------------------------
+    def _span(self, name: str, **attributes):
+        """A tracing span, or a no-op when there is no tracker."""
+        if self.tracker is None:
+            return nullcontext(NO_SPAN)
+        return self.tracker.span(name, **attributes)
+
     def step(self) -> Node:
         stage, parent = self.next_action()
         node = Node(id=len(self.journal.nodes) + 1, stage=stage,
                     parent=parent.id if parent else None,
                     debug_depth=parent.debug_depth + 1 if stage == "debug" else 0)
-        user_prompt = self.build_prompt(stage, parent)
-        reply = self.llm.complete(self.system, user_prompt)
+        with self._span("orbit.step", node_id=node.id, stage=stage, parent=node.parent) as root:
+            root.set_trace_tags(**{"orbit.node": str(node.id), "orbit.stage": stage})
+            try:
+                self._experiment(node, parent)
+            except Exception as e:
+                root.set(status="failed", error=_error_line(str(e) or type(e).__name__))
+                root.set_trace_tags(**{"orbit.status": "failed"})
+                raise
+            status = "failed" if node.buggy else "ok"
+            root.set(status=status, val_score=node.metric, error=_error_line(node.error))
+            root.set_trace_tags(**{"orbit.status": status})
+        return node
+
+    def _experiment(self, node: Node, parent: Node | None) -> None:
+        user_prompt = self.build_prompt(node.stage, parent)
+        with self._span("llm", model=getattr(self.llm, "model", None)) as span:
+            reply = self.llm.complete(self.system, user_prompt)
+            span.set(prompt_tokens=reply.prompt_tokens, completion_tokens=reply.completion_tokens)
         node.prompt_tokens, node.completion_tokens = reply.prompt_tokens, reply.completion_tokens
         node.plan, node.code = prompts.parse_response(reply.text)
 
@@ -184,7 +215,6 @@ class Agent:
         if self.tracker:
             self.tracker.log_node(node, workdir)
         self.on_node(node, self)
-        return node
 
     def _fwork(self, workdir: Path, fold: int) -> Path:
         return workdir if self.task.n_folds == 1 else workdir / f"fold_{fold}"
@@ -195,7 +225,9 @@ class Agent:
         out, err, scores = [], [], []
         for k in range(1, n + 1):
             fwork = self._fwork(workdir, k)
-            result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.cfg.exec_timeout)
+            with self._span("sandbox", fold=k) as span:
+                result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.cfg.exec_timeout)
+                span.set(seconds=round(result.duration, 2), ok=result.ok, timed_out=result.timed_out)
             node.duration += result.duration
             tag = f"fold {k}/{n}: " if n > 1 else ""
             if n > 1:
@@ -203,7 +235,9 @@ class Agent:
                 err.append(f"=== fold {k}/{n} ===\n{result.stderr}")
             else:
                 out, err = [result.stdout], [result.stderr]
-            error, value = self._score_fold(result, fwork, k)
+            with self._span("score", fold=k) as span:
+                error, value = self._score_fold(result, fwork, k)
+                span.set(score=value)
             if error:
                 node.error = tag + error
                 break

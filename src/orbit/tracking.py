@@ -1,6 +1,7 @@
 """Experiment tracking backends. The orchestrator (never the sandbox) does all logging.
 
-MLflow: one experiment per problem, one parent run per orbit run, one nested child run per experiment.
+MLflow: one experiment per problem, one parent run per orbit run, one nested child run per experiment,
+        and one trace per search step (disable with ORBIT_TRACING=off).
 W&B:    one run per orbit run; experiments are logged as steps plus a summary table.
 Tracking problems are reported but never abort a search.
 """
@@ -9,6 +10,7 @@ import json
 import logging
 import os
 import statistics
+from contextlib import nullcontext
 from importlib import metadata
 from pathlib import Path
 
@@ -30,6 +32,21 @@ def _safe(fn):
         except Exception as e:  # noqa: BLE001
             log.warning("tracking (%s) failed in %s: %s", type(self).__name__, fn.__name__, e)
     return wrapper
+
+
+class Span:
+    """What `tracker.span` yields: a handle for adding attributes (None values are skipped) while
+    the span is open. This base class is the no-op used when nothing is being traced."""
+
+    def set(self, **attributes) -> None: ...
+    def set_trace_tags(self, **tags) -> None: ...
+
+
+NO_SPAN = Span()
+
+
+def tracing_enabled() -> bool:
+    return os.environ.get("ORBIT_TRACING", "").strip().lower() not in ("off", "0", "false", "no")
 
 
 def resolve_experiment(explicit: str | None, sources: list[str], name: str | None = None) -> str:
@@ -109,6 +126,51 @@ class NullTracker:
     def log_node(self, node, workdir: Path): pass
     def finish(self, task, journal): pass
     def log_report(self, path: Path): pass
+    def span(self, name, **attributes): return nullcontext(NO_SPAN)
+
+
+class _MLflowSpan(Span):
+    """One MLflow span. Exceptions from the traced code pass through (and are recorded on the
+    span); a failure of the tracing itself switches tracing off and never reaches the caller."""
+
+    def __init__(self, tracker, name, attributes):
+        self.tracker, self.name, self.attributes = tracker, name, attributes
+        self._cm = self._span = None
+
+    def __enter__(self):
+        if self.tracker._tracing:
+            try:
+                self._cm = self.tracker.mlflow.start_span(
+                    name=self.name, span_type="CHAIN", attributes=self.attributes)
+                self._span = self._cm.__enter__()
+            except Exception as e:  # noqa: BLE001
+                self._cm = None
+                self.tracker._tracing_failed(e)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._cm is None:
+            return False
+        try:
+            self._cm.__exit__(exc_type, exc, tb)
+        except BaseException as e:  # noqa: BLE001
+            if e is not exc:  # the traced code's own exception is re-raised by the caller
+                self.tracker._tracing_failed(e)
+        return False
+
+    def set(self, **attributes):
+        if self._cm is not None:
+            try:
+                self._span.set_attributes({k: v for k, v in attributes.items() if v is not None})
+            except Exception as e:  # noqa: BLE001
+                self.tracker._tracing_failed(e)
+
+    def set_trace_tags(self, **tags):
+        if self._cm is not None:
+            try:
+                self.tracker.mlflow.update_current_trace(tags=tags)
+            except Exception as e:  # noqa: BLE001
+                self.tracker._tracing_failed(e)
 
 
 class MLflowTracker:
@@ -120,6 +182,34 @@ class MLflowTracker:
         self.mlflow = mlflow
         self.experiment = experiment
         self.parent = None
+        self._tracing = tracing_enabled()
+
+    def _tracing_failed(self, error):
+        if self._tracing:  # warn once, then leave tracing off for the rest of the run
+            log.warning("tracing disabled after an error: %s", error)
+        self._tracing = False
+
+    def span(self, name, **attributes):
+        attributes = {k: v for k, v in attributes.items() if v is not None}
+        return _MLflowSpan(self, name, attributes)
+
+    def _flush_traces(self):
+        """Traces are exported in the background; wait for the last ones before the run closes."""
+        if not self._tracing:
+            return
+        try:
+            self.mlflow.flush_trace_async_logging()
+        except Exception as e:  # noqa: BLE001
+            log.warning("tracking: could not flush traces: %s", e)
+
+    def _autolog_llm_calls(self):
+        """Record the OpenAI SDK's chat completions as spans inside orbit's own spans."""
+        if not self._tracing:
+            return
+        try:
+            self.mlflow.openai.autolog()
+        except Exception as e:  # noqa: BLE001
+            log.warning("tracking: LLM call tracing unavailable: %s", e)
 
     def _set_experiment(self):
         mlflow = self.mlflow
@@ -137,6 +227,7 @@ class MLflowTracker:
     def start(self, task, config, llm_model):
         mlflow = self.mlflow
         self._set_experiment()
+        self._autolog_llm_calls()
         self.parent = mlflow.start_run(run_name=task.run_dir.name)
         for key, value in _run_tags(task, config).items():
             try:
@@ -187,6 +278,7 @@ class MLflowTracker:
     def finish(self, task, journal):
         client, run_id = self.mlflow.MlflowClient(), self.parent.info.run_id
         try:
+            self._flush_traces()
             best = journal.get(journal.best_id) if journal.best_id else None
             if best:
                 client.log_metric(run_id, "best_val_score", best.metric)
@@ -249,6 +341,8 @@ class WandbTracker:
                                      "best_experiment": best.id})
         self.run.summary["stop_reason"] = journal.stop_reason
         self.run.finish()
+
+    def span(self, name, **attributes): return nullcontext(NO_SPAN)
 
     @_safe
     def log_report(self, path: Path):

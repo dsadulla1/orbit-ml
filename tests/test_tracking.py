@@ -220,3 +220,116 @@ def test_experiments_command_reports_unreachable_server(monkeypatch):
     finally:
         mlflow.set_tracking_uri(None)
     assert result.exit_code == 1 and "Could not reach MLflow" in result.output
+
+
+def _traced_run(clf_csv, tmp_path, replies, folds=2, experiment="orbit-trace"):
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=folds), tmp_path / "run")
+    cfg = SearchConfig(max_steps=len(replies), n_drafts=len(replies))
+    tracker = MLflowTracker(experiment=experiment)
+    tracker.start(task, cfg, "scripted")
+    agent = Agent(task, ScriptedLLM(replies), LocalSandbox(), cfg, tracker=tracker)
+    return tracker, agent
+
+
+def _traces(experiment="orbit-trace"):
+    import mlflow
+
+    mlflow.flush_trace_async_logging()
+    exp = mlflow.MlflowClient().get_experiment_by_name(experiment)
+    traces = mlflow.search_traces(locations=[exp.experiment_id], return_type="list")
+    return sorted(traces, key=lambda t: t.info.tags["orbit.node"])
+
+
+def test_mlflow_traces_one_per_step(clf_csv, tmp_path, mlflow_uri):
+    tracker, agent = _traced_run(clf_csv, tmp_path, [clf_reply(), BROKEN, clf_reply()])
+    agent.run()
+    traces = _traces()
+    assert len(traces) == 3
+    assert [t.info.tags["orbit.status"] for t in traces] == ["ok", "failed", "ok"]
+    assert all(t.info.tags["orbit.stage"] == "draft" for t in traces)
+
+    spans = {s.name: s for s in traces[0].data.spans}
+    root = spans["orbit.step"]
+    assert sorted(s.name for s in traces[0].data.spans) == ["llm", "orbit.step", "sandbox",
+                                                           "sandbox", "score", "score"]
+    assert root.attributes["node_id"] == 1 and root.attributes["stage"] == "draft"
+    assert root.attributes["status"] == "ok" and 0.5 < root.attributes["val_score"] <= 1
+    assert "error" not in root.attributes
+    assert spans["llm"].attributes["prompt_tokens"] == 100
+    assert spans["llm"].attributes["completion_tokens"] == 50
+    assert spans["llm"].attributes["model"] == "scripted"
+    sandbox = [s for s in traces[0].data.spans if s.name == "sandbox"]
+    assert sorted(s.attributes["fold"] for s in sandbox) == [1, 2]
+    assert all(s.attributes["ok"] is True and s.attributes["timed_out"] is False for s in sandbox)
+    assert all(s.parent_id == root.span_id for s in traces[0].data.spans if s is not root)
+
+    failed = {s.name: s for s in traces[1].data.spans}
+    assert failed["orbit.step"].attributes["status"] == "failed"
+    assert "could not convert string to float" in failed["orbit.step"].attributes["error"]
+    assert failed["sandbox"].attributes["ok"] is False
+    assert [s.name for s in traces[1].data.spans].count("score") == 1  # stops at the failing fold
+    assert "score" not in failed["score"].attributes
+
+
+def test_llm_error_is_recorded_and_still_raised(clf_csv, tmp_path, mlflow_uri):
+    tracker, agent = _traced_run(clf_csv, tmp_path, [clf_reply()], folds=1)
+
+    def boom(system, user):
+        raise ConnectionError("endpoint down")
+    agent.llm.complete = boom
+    with pytest.raises(ConnectionError, match="endpoint down"):
+        agent.step()
+    (trace,) = _traces()
+    root = next(s for s in trace.data.spans if s.name == "orbit.step")
+    assert root.status.status_code.value == "ERROR"
+    assert root.attributes["status"] == "failed" and "endpoint down" in root.attributes["error"]
+    assert trace.info.tags["orbit.status"] == "failed"
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "0", "false", "No"])
+def test_tracing_can_be_switched_off(clf_csv, tmp_path, mlflow_uri, monkeypatch, value):
+    monkeypatch.setenv("ORBIT_TRACING", value)
+    tracker, agent = _traced_run(clf_csv, tmp_path, [clf_reply(), BROKEN], folds=1)
+    journal = agent.run()
+    assert len(journal.nodes) == 2
+    assert _traces() == []
+
+
+def test_tracing_failure_warns_once_and_search_continues(clf_csv, tmp_path, mlflow_uri,
+                                                         monkeypatch, caplog):
+    import mlflow
+
+    calls = []
+
+    def broken(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("trace store unavailable")
+    tracker, agent = _traced_run(clf_csv, tmp_path, [clf_reply(), BROKEN, clf_reply()], folds=1)
+    monkeypatch.setattr(mlflow, "start_span", broken)
+    with caplog.at_level("WARNING", logger="orbit"):
+        journal = agent.run()
+    assert [n.buggy for n in journal.nodes] == [False, True, False]
+    assert len(calls) == 1  # later spans do not retry
+    assert [r.message for r in caplog.records if "tracing" in r.message].count(
+        "tracing disabled after an error: trace store unavailable") == 1
+    assert (tracker.mlflow.MlflowClient().search_runs(
+        [tracker.parent.info.experiment_id])), "run logging is unaffected"
+
+
+def test_autolog_failure_only_warns(clf_csv, tmp_path, mlflow_uri, monkeypatch, caplog):
+    import mlflow.openai
+
+    def broken(**kwargs):
+        raise ImportError("no openai flavor")
+    monkeypatch.setattr(mlflow.openai, "autolog", broken)
+    with caplog.at_level("WARNING", logger="orbit"):
+        tracker, agent = _traced_run(clf_csv, tmp_path, [clf_reply()], folds=1)
+    assert "LLM call tracing unavailable" in caplog.text
+    assert agent.step().metric is not None
+    assert len(_traces()) == 1
+
+
+def test_null_tracker_span_is_a_no_op():
+    with NullTracker().span("x", a=1) as span:
+        span.set(b=2)
+        span.set_trace_tags(c="3")

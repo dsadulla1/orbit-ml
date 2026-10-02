@@ -143,6 +143,8 @@ def test_docker_sandbox_removes_symlinks_left_by_the_script(tmp_path, monkeypatc
     workdir = tmp_path / "exp"
 
     def fake_run(cmd, **kwargs):
+        if "stats" in cmd:  # the resource sampler runs alongside
+            return subprocess.CompletedProcess(cmd, 1, "", "")
         # A script can plant links to host paths (found via /proc/self/mountinfo).
         for name in ("stdout.txt", "predictions.csv", "prompt.md"):
             (workdir / name).symlink_to(secret)

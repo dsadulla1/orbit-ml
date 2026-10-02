@@ -65,6 +65,8 @@ class Node:
     debug_depth: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    peak_mem_mb: float | None = None   # sandbox memory, maximum over folds
+    cpu_pct: float | None = None       # sandbox CPU (100 = one core), mean over folds
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -222,13 +224,17 @@ class Agent:
     def _run_folds(self, node: Node, workdir: Path) -> None:
         """Run the script once per fold and score each fold's validation rows."""
         task, n = self.task, self.task.n_folds
-        out, err, scores = [], [], []
+        out, err, scores, mems, cpus = [], [], [], [], []
         for k in range(1, n + 1):
             fwork = self._fwork(workdir, k)
             with self._span("sandbox", fold=k) as span:
                 result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.cfg.exec_timeout)
                 span.set(seconds=round(result.duration, 2), ok=result.ok, timed_out=result.timed_out)
             node.duration += result.duration
+            if result.peak_mem_mb is not None:
+                mems.append(result.peak_mem_mb)
+            if result.cpu_pct_mean is not None:
+                cpus.append(result.cpu_pct_mean)
             tag = f"fold {k}/{n}: " if n > 1 else ""
             if n > 1:
                 out.append(f"=== fold {k}/{n} ===\n{result.stdout}")
@@ -242,6 +248,8 @@ class Agent:
                 node.error = tag + error
                 break
             scores.append(value)
+        node.peak_mem_mb = max(mems) if mems else None
+        node.cpu_pct = sum(cpus) / len(cpus) if cpus else None
         (workdir / "stdout.txt").write_text("\n".join(out), encoding="utf-8")
         (workdir / "stderr.txt").write_text("\n".join(err), encoding="utf-8")
         if n > 1:

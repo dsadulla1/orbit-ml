@@ -6,10 +6,13 @@ Each experiment runs in a fresh container:
   * CPU / memory / process limits and a wall-clock timeout
 Hidden labels live outside both mounts, so generated code can never read them.
 """
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +33,9 @@ class ExecResult:
     stderr: str
     duration: float
     timed_out: bool = False
+    peak_mem_mb: float | None = None     # container memory, from `docker stats` samples
+    cpu_pct_mean: float | None = None    # 100 = one core fully busy
+    cpu_pct_peak: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -46,6 +52,70 @@ def _read_tail(f, limit: int = MAX_LOG_CHARS) -> str:
     f.seek(max(0, size - limit))
     text = f.read().decode("utf-8", "replace")
     return text if size <= limit else "...[truncated]...\n" + text
+
+
+_UNITS = {"b": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+          "kib": 1024, "mib": 1024**2, "gib": 1024**3, "tib": 1024**4}
+STATS_INTERVAL = 0.5
+
+
+def _megabytes(text: str) -> float | None:
+    found = re.fullmatch(r"([0-9.]+)\s*([A-Za-z]+)", text.strip())
+    if not found or found.group(2).lower() not in _UNITS:
+        return None
+    try:
+        return float(found.group(1)) * _UNITS[found.group(2).lower()] / 1024**2
+    except ValueError:
+        return None
+
+
+def parse_stats(line: str) -> tuple[float | None, float | None]:
+    """(memory in MiB, CPU percent) from one `docker stats --format '{{json .}}'` line; None for
+    a value that is missing (`--`) or unreadable."""
+    try:
+        d = json.loads(line)
+        mem = _megabytes(str(d.get("MemUsage", "")).split("/")[0])
+        cpu = str(d.get("CPUPerc", "")).strip().rstrip("%")
+    except (ValueError, AttributeError):
+        return None, None
+    try:
+        return mem, float(cpu)
+    except ValueError:
+        return mem, None
+
+
+class _StatsSampler(threading.Thread):
+    """Polls `docker stats` for a running container from outside; read-only observation. Errors
+    (including polls before the container exists) are ignored."""
+
+    def __init__(self, docker: str, name: str):
+        super().__init__(daemon=True)
+        self.docker, self.container = docker, name
+        self.stop_event = threading.Event()
+        self.mem: list[float] = []
+        self.cpu: list[float] = []
+
+    def run(self) -> None:
+        cmd = [self.docker, "stats", "--no-stream", "--format", "{{json .}}", self.container]
+        while not self.stop_event.is_set():
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if out.returncode == 0 and out.stdout.strip():
+                    mem, cpu = parse_stats(out.stdout.strip().splitlines()[0])
+                    if mem is not None:
+                        self.mem.append(mem)
+                    if cpu is not None:
+                        self.cpu.append(cpu)
+            except Exception:  # noqa: BLE001
+                pass
+            self.stop_event.wait(STATS_INTERVAL)
+
+    def finish(self) -> tuple[float | None, float | None, float | None]:
+        self.stop_event.set()
+        self.join(timeout=2)
+        mem, cpu = list(self.mem), list(self.cpu)
+        return (max(mem) if mem else None, sum(cpu) / len(cpu) if cpu else None,
+                max(cpu) if cpu else None)
 
 
 def _host_is_root() -> bool:
@@ -100,7 +170,9 @@ class DockerSandbox:
         start = time.monotonic()
         # Logs go to temp files outside the writable mount, so a chatty script can't
         # exhaust orchestrator memory; only the tail is kept.
+        sampler = _StatsSampler(self.docker, name)
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            sampler.start()
             try:
                 proc = subprocess.run(self.command(workdir, data_dir, name),
                                       stdout=out, stderr=err, timeout=timeout)
@@ -112,9 +184,12 @@ class DockerSandbox:
                 self._kill(name)
                 returncode, timed_out = -1, True
                 note = f"\nTimeoutError: experiment exceeded {timeout}s and was killed."
+            finally:
+                peak_mem, cpu_mean, cpu_peak = sampler.finish()
             stdout, stderr = _read_tail(out), _read_tail(err) + note
         _remove_symlinks(workdir)
-        return ExecResult(returncode, stdout, stderr, time.monotonic() - start, timed_out)
+        return ExecResult(returncode, stdout, stderr, time.monotonic() - start, timed_out,
+                          peak_mem, cpu_mean, cpu_peak)
 
 
 def _remove_symlinks(workdir: Path) -> None:

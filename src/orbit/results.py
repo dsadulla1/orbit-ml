@@ -42,6 +42,7 @@ def _tracker_link(run_dir: Path) -> dict | None:
         uri = info.get("uri", "")
         if uri.startswith("http"):
             info["url"] = f"{uri.rstrip('/')}/#/experiments/{info['experiment_id']}/runs/{info['run_id']}"
+            info["traces_url"] = f"{uri.rstrip('/')}/#/experiments/{info['experiment_id']}/traces"
         return info
     except (ValueError, KeyError, AttributeError):
         return None  # a damaged tracking.json only costs the link

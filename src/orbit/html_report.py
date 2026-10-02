@@ -183,7 +183,7 @@ TEMPLATE = """<!doctype html>
 {% if notes %}<h2>How the task was set up</h2><div class="card"><ul class="notes">
 {% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul></div>{% endif %}
 
-<p class="meta" style="margin-top:32px">{{ footer }}{% if link %} &middot; <a href="{{ link }}">Open in MLflow{% if link_label %}: {{ link_label }}{% endif %}</a>{% endif %}</p>
+<p class="meta" style="margin-top:32px">{{ footer }}{% if link %} &middot; <a href="{{ link }}">Open in MLflow{% if link_label %}: {{ link_label }}{% endif %}</a>{% if traces_link %} &middot; <a href="{{ traces_link }}">Traces</a>{% endif %}{% endif %}</p>
 </main></body></html>
 """
 
@@ -222,4 +222,4 @@ def render(data: dict) -> str:
         chart=score_chart(exps, task["baseline"], best_id, task["greater_is_better"], task["metric"]),
         progress=progress_chart(exps, task["greater_is_better"], task["metric"]), folds=task["folds"],
         rows=rows, code=(data.get("best") or {}).get("code"), script=(data.get("best") or {}).get("script"),
-        notes=prob["notes"], link=tracker.get("url"), link_label=tracker.get("experiment_name"), footer=f"orbit run {data['run']}")
+        notes=prob["notes"], link=tracker.get("url"), traces_link=tracker.get("traces_url"), link_label=tracker.get("experiment_name"), footer=f"orbit run {data['run']}")

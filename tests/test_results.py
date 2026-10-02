@@ -115,3 +115,17 @@ def test_damaged_tracking_file_and_bad_run_ids(clf_csv, tmp_path):
     assert results.collect(task.run_dir)["tracker"] is None
     with pytest.raises(ValueError, match="not an MLflow run id"):
         results.collect_mlflow("abc' OR tags.x = '1")
+
+
+def test_html_links_to_the_traces(clf_csv, tmp_path):
+    task, _ = _run(tmp_path, clf_csv)
+    (task.run_dir / "tracking.json").write_text(json.dumps({
+        "uri": "http://localhost:5000/", "experiment_id": "3", "run_id": "abc"}))
+    data = results.collect(task.run_dir)
+    assert data["tracker"]["traces_url"] == "http://localhost:5000/#/experiments/3/traces"
+    assert 'href="http://localhost:5000/#/experiments/3/traces">Traces</a>' in html_report.render(data)
+    (task.run_dir / "tracking.json").write_text(json.dumps({
+        "uri": "sqlite:///x.db", "experiment_id": "3", "run_id": "abc"}))
+    data = results.collect(task.run_dir)
+    assert "traces_url" not in data["tracker"]
+    assert "Traces</a>" not in html_report.render(data)

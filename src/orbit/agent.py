@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import random
+import statistics
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ class SearchConfig:
     exec_timeout: int = 600
     cpus: float = 4
     seed: int = 0
+    patience: int | None = None        # stop after this many working experiments without a clear gain
 
 
 @dataclass
@@ -59,6 +61,11 @@ class Node:
     @property
     def buggy(self) -> bool:
         return self.metric is None or not math.isfinite(self.metric)
+
+
+def _spread(node: Node) -> float:
+    """Sample standard deviation of the fold scores (0 for a single split)."""
+    return statistics.stdev(node.fold_scores) if len(node.fold_scores) > 1 else 0.0
 
 
 @dataclass
@@ -225,7 +232,26 @@ class Agent:
             return f"time budget ({cfg.time_budget:.0f}s) reached"
         if cfg.token_budget and j.tokens >= cfg.token_budget:
             return f"token budget ({cfg.token_budget:,}) reached"
+        if cfg.patience and self._stale() >= cfg.patience:
+            return f"no improvement beyond the fold spread in the last {cfg.patience} experiments"
         return None
+
+    def _stale(self) -> int:
+        """Working experiments since the last clear improvement. An experiment is a clear
+        improvement when it beats the previous clear improvement (the anchor) by more than the
+        anchor's spread across folds, so several small gains still add up to one. Failed
+        experiments say nothing and are not counted."""
+        sign = 1 if self.task.metric.greater_is_better else -1
+        anchor: Node | None = None
+        stale = 0
+        for node in self.journal.nodes:
+            if node.buggy:
+                continue
+            if anchor is None or sign * (node.metric - anchor.metric) > _spread(anchor):
+                anchor, stale = node, 0
+            else:
+                stale += 1
+        return stale
 
     def run(self) -> Journal:
         llm_failures = 0

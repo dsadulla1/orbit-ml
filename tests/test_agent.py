@@ -1,6 +1,9 @@
-import pandas as pd
+import math
 
-from orbit.agent import Agent, Journal, SearchConfig
+import pandas as pd
+from sklearn.datasets import make_classification
+
+from orbit.agent import Agent, Journal, Node, SearchConfig
 from orbit.task import TaskSpec, prepare
 
 from conftest import BAD_OUTPUT, BROKEN, LocalSandbox, ScriptedLLM, clf_reply
@@ -132,3 +135,95 @@ def test_non_finite_scores_count_as_failures(clf_csv, tmp_path, monkeypatch):
     assert node.buggy and "not finite" in node.error and agent.journal.best_id is None
     from orbit.agent import Node
     assert Node(1, "draft", None, metric=float("nan")).buggy
+
+
+def test_time_ordered_cross_validated_search(tmp_path):
+    n = 400
+    X, y = make_classification(n_samples=n, n_features=6, n_informative=4, weights=[0.7, 0.3],
+                               random_state=0)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(6)])
+    df["day"] = range(n)
+    df["label"] = pd.Series(y).map({0: "no", 1: "yes"})
+    df = df.sample(frac=1.0, random_state=3)
+    csv = tmp_path / "ts.csv"
+    df.to_csv(csv, index=False)
+    task = prepare(TaskSpec(str(csv), "label", folds=3, time_col="day"), tmp_path / "run")
+    llm = ScriptedLLM([clf_reply()])
+    agent = Agent(task, llm, LocalSandbox(), SearchConfig(exec_timeout=120, max_steps=1, n_drafts=1))
+    node = agent.run().nodes[0]
+    assert len(node.fold_scores) == 3 and not node.buggy
+    assert node.test_metric is not None and math.isfinite(node.test_metric)
+    assert "later in time (column 'day')" in llm.prompts[0]
+
+
+# ---- patience -----------------------------------------------------------------------------
+
+def _stale(tmp_path, clf_csv, nodes, patience=3, metric="roc_auc", folds=1):
+    """The agent's stale count for hand-built nodes: (metric, fold_scores), None = failed."""
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=folds, metric=metric), tmp_path / "run")
+    agent = Agent(task, ScriptedLLM([]), LocalSandbox(), SearchConfig(patience=patience))
+    for i, item in enumerate(nodes, 1):
+        value, fold_scores = item if item else (None, [])
+        agent.journal.nodes.append(Node(i, "draft", None, metric=value, fold_scores=fold_scores))
+    return agent._stale(), agent._budget_exhausted()
+
+
+def test_patience_gain_within_spread_does_not_reset(tmp_path, clf_csv):
+    spread = [0.80, 0.84, 0.76]   # sample std 0.04
+    nodes = [(0.80, spread), (0.82, spread), (0.83, spread)]
+    stale, reason = _stale(tmp_path, clf_csv, nodes, folds=3)
+    assert stale == 2 and reason is None
+    stale, reason = _stale(tmp_path, clf_csv, nodes + [(0.81, spread)], patience=3, folds=3)
+    assert stale == 3
+    assert reason == "no improvement beyond the fold spread in the last 3 experiments"
+
+
+def test_patience_small_gains_add_up_to_a_clear_improvement(tmp_path, clf_csv):
+    spread = [0.76, 0.80, 0.84]  # std 0.04
+    # Each step gains only 0.03 (< 0.04), but compared with the last clear improvement they add up.
+    nodes = [(0.80, spread), (0.83, spread), (0.86, spread), (0.89, spread)]
+    assert _stale(tmp_path, clf_csv, nodes[:2], folds=3)[0] == 1   # 0.03 above the anchor: not clear
+    assert _stale(tmp_path, clf_csv, nodes[:3], folds=3)[0] == 0   # 0.06 above it: counted, new anchor
+    assert _stale(tmp_path, clf_csv, nodes, folds=3)[0] == 1       # 0.03 above the new anchor
+
+
+def test_patience_larger_gain_resets(tmp_path, clf_csv):
+    spread = [0.80, 0.84, 0.76]
+    nodes = [(0.80, spread), (0.80, spread), (0.80, spread), (0.90, spread)]
+    assert _stale(tmp_path, clf_csv, nodes, folds=3)[0] == 0
+
+
+def test_patience_ignores_failed_experiments(tmp_path, clf_csv):
+    nodes = [(0.7, [0.7]), None, (0.7, [0.7]), None, None, None]
+    stale, reason = _stale(tmp_path, clf_csv, nodes, patience=2)
+    assert stale == 1 and reason is None
+
+
+def test_patience_single_split_has_no_spread(tmp_path, clf_csv):
+    # With one score the spread is 0, so any gain counts.
+    assert _stale(tmp_path, clf_csv, [(0.700, [0.700]), (0.701, [0.701])])[0] == 0
+    assert _stale(tmp_path, clf_csv, [(0.700, [0.700]), (0.700, [0.700])])[0] == 1
+
+
+def test_patience_lower_is_better(tmp_path, clf_csv):
+    spread = [0.40, 0.44, 0.36]
+    stale, _ = _stale(tmp_path, clf_csv, [(0.40, spread), (0.38, spread)], metric="log_loss", folds=3)
+    assert stale == 1                       # 0.02 better but within the 0.04 spread
+    stale, _ = _stale(tmp_path, clf_csv, [(0.40, spread), (0.30, spread)], metric="log_loss", folds=3)
+    assert stale == 0
+    stale, _ = _stale(tmp_path, clf_csv, [(0.40, spread), (0.50, spread)], metric="log_loss", folds=3)
+    assert stale == 1                       # worse is never an improvement
+
+
+def test_patience_none_never_stops(tmp_path, clf_csv):
+    nodes = [(0.7, [0.7])] * 6
+    stale, reason = _stale(tmp_path, clf_csv, nodes, patience=None)
+    assert stale == 5 and reason is None
+
+
+def test_search_stops_when_scores_stall(clf_csv, tmp_path):
+    agent, _ = _agent(tmp_path, clf_csv, [clf_reply()] * 8, max_steps=8, n_drafts=8, patience=2)
+    journal = agent.run()
+    assert len(journal.nodes) == 3        # one improvement, then two identical scores
+    assert journal.stop_reason == "no improvement beyond the fold spread in the last 2 experiments"
+    assert journal.nodes[journal.best_id - 1].test_metric is not None

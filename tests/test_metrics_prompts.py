@@ -118,6 +118,8 @@ def test_prompts_cover_the_common_crashes():
                          prediction_rule="rule", timeout=60, cpus=2)
     assert "must be encoded" in text and "Missing values exist" in text
     assert "data/train.csv and data/test.csv together" in text
+    assert "from orbit_helpers import load" in text and "d.save(pred)" in text
+    assert "d.X_train_filled" in text and "d.cat_columns" in text and "raw" in text
     from orbit.prompts import DEBUG
     assert "Do not repeat a fix" in DEBUG
 

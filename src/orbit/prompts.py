@@ -42,6 +42,24 @@ LogisticRegression reject NaN.
 cross-validation score for reference; keep other output short.
 - Use a fixed random seed. Do not try to read anything outside data/.
 
+Recommended starting point: the helper module data/orbit_helpers.py handles encoding and the \
+predictions file, so most crashes disappear:
+```python
+import sys; sys.path.insert(0, "data")
+from orbit_helpers import load
+d = load()
+model = ...  # fit on d.X_train_filled (or d.X_train for LightGBM/XGBoost) and d.y_train
+pred = ...   # predict on d.X_test_filled / d.X_test (probability, label or number as the rule says)
+d.save(pred)  # validates length, values and writes predictions.csv
+```
+d.X_train / d.X_test are numeric (text columns already encoded consistently for train and test; \
+d.cat_columns lists them, for LightGBM/XGBoost categorical handling); d.X_train_filled / d.X_test_filled \
+have no NaN (for Ridge, LogisticRegression, ...). d.y_train is the target; d.y_train_binary is the 0/1 \
+target when the metric needs a probability; d.classes lists the labels. You may still read the raw \
+CSVs, use d.train_df / d.test_df, engineer features, join d.extra("name") tables, and add the new \
+columns to the numeric frames yourself. Use d.save(pred) instead of writing predictions.csv by hand; \
+the rule above still applies to pred.
+
 Reply format (exactly):
 PLAN: <one to three sentences: what this experiment tries and why>
 ```python

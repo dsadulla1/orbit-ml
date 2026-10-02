@@ -20,6 +20,7 @@ which unlabeled rows are validation (used to rank experiments during search) and
 """
 import json
 import warnings
+from importlib import resources
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -31,6 +32,9 @@ from .metrics import ID_COL, METRICS, Metric, score
 from .planner import describe_table, read_docs, read_table
 
 MAX_CLASSES = 30
+META_FILE = "orbit_meta.json"
+HELPER_FILE = "orbit_helpers.py"
+META_MAX_CLASSES = 50
 AUTO_FOLDS = 5
 AUTO_CV_MAX_ROWS = 10_000  # larger datasets use one validation split: k runs per experiment is costly
 
@@ -334,6 +338,7 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
                      | (hidden["_split"] == "test")]
         ids.sample(frac=1.0, random_state=spec.seed + k)[[ID_COL] + features].to_csv(
             out / "test.csv", index=False)
+        _write_helper_files(out, spec, kind, metric, positive_label, classes, n_folds, list(extras))
         baselines.append(_baseline(metric, train_k[spec.target], val_k[spec.target], positive_label))
 
     baseline = float(np.mean(baselines))
@@ -350,6 +355,19 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     )
     task.save()
     return task
+
+
+def _write_helper_files(out: Path, spec: TaskSpec, kind: str, metric: Metric, positive_label,
+                        classes: list, n_folds: int, extra_names: list[str]) -> None:
+    """orbit_meta.json and orbit_helpers.py next to train.csv/test.csv. The meta describes the task
+    (names and settings only): no labels beyond the class names, no rows, no host paths."""
+    meta = {"target": spec.target, "kind": kind, "metric": metric.name,
+            "needs_proba": metric.needs_proba, "needs_nonneg": metric.needs_nonneg,
+            "positive_label": positive_label, "classes": classes[:META_MAX_CLASSES],
+            "id_column": spec.id_column, "time_col": spec.time_col, "n_folds": n_folds,
+            "extra_names": extra_names}
+    (out / META_FILE).write_text(json.dumps(meta, indent=2))
+    (out / HELPER_FILE).write_text(resources.files("orbit").joinpath("helpers.py").read_text("utf-8"))
 
 
 def _read_extras(paths: list[str]) -> dict[str, pd.DataFrame]:

@@ -48,6 +48,9 @@ class MLflowTracker:
         for key, value in MLFLOW_FAIL_FAST.items():
             os.environ.setdefault(key, value)
         import mlflow
+        # MLflow announces every finished run ("View run ... at ...") on the console; the CLI
+        # shows one line per experiment already.
+        logging.getLogger("mlflow").setLevel(logging.WARNING)
         self.mlflow = mlflow
         self.experiment = experiment
         self.parent = None

@@ -82,3 +82,10 @@ def test_mlflow_fails_fast_unless_configured(monkeypatch):
     assert os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] == "1"
     assert os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] == "15"
     assert os.environ["MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR"] == "5"
+
+
+def test_mlflow_console_announcements_are_silenced():
+    import logging
+
+    MLflowTracker()
+    assert logging.getLogger("mlflow.tracking.fluent").getEffectiveLevel() >= logging.WARNING

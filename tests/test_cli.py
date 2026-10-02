@@ -54,3 +54,8 @@ def test_explore_folder_xlsx_and_failures(tmp_path):
     assert r.exit_code == 1 and "not found" in r.output and "train.csv: id, label" in r.output
     r = runner.invoke(app, ["explore", str(tmp_path / "missing")])
     assert r.exit_code == 1 and "Could not read the data" in r.output and "Traceback" not in r.output
+
+
+def test_run_rejects_empty_experiment(clf_csv):
+    result = runner.invoke(app, ["run", str(clf_csv), "-t", "label", "--experiment", "  "])
+    assert result.exit_code != 0 and "empty" in result.output

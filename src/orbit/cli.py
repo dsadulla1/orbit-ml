@@ -113,6 +113,9 @@ def run(
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
     name: str = typer.Option(None, help="Name for the run folder: <timestamp>-<name> "
                                         "(default: taken from the first data source)"),
+    experiment: str = typer.Option(None, "--experiment",
+                                   help="MLflow experiment / W&B project to log to (default: named "
+                                        "after the problem)"),
     seed: int = typer.Option(42),
 ):
     """Solve a prediction problem: orbit builds and compares models, then reports.
@@ -126,10 +129,14 @@ def run(
     from .problem import run_name, sanitize_name, setup_task
     from .sandbox import DockerSandbox, check_docker
     from .sources import SourceError
-    from .tracking import make_tracker
+    from .tracking import make_tracker, resolve_experiment
 
     if tracker not in TRACKERS:
         raise typer.BadParameter(f"choose one of {', '.join(TRACKERS)}", param_hint="--tracker")
+    try:
+        experiment_name = resolve_experiment(experiment, data, name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--experiment")
     sb_settings = SandboxSettings()
     ok, msg = check_docker(sb_settings)
     if not ok:
@@ -148,14 +155,15 @@ def run(
     cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
                        n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
                        cpus=sb_settings.cpus, seed=seed, patience=patience)
-    trk = make_tracker(tracker_choice(tracker))
+    trk = make_tracker(tracker_choice(tracker), experiment_name)
     trk.start(task, cfg, llm.model)
 
     scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
     if task.spec.time_col:
         scheme = (f"{task.n_folds} forward-chaining folds" if task.n_folds > 1 else "single split") \
                  + f" ordered by {escape(task.spec.time_col)}"
-    console.print(f"[bold]orbit[/] {escape(str(run_dir))}  model={escape(llm.model)}  tracker={trk.name}")
+    console.print(f"[bold]orbit[/] {escape(str(run_dir))}  model={escape(llm.model)}  tracker={trk.name}"
+                  + (f"  experiment={escape(experiment_name)}" if trk.name != "none" else ""))
     console.print(f"  data: {escape(Path(task.spec.data_path).name)}, target={escape(task.spec.target)}, "
                   f"metric={task.metric_name}, baseline={task.baseline:.4f}, validation={scheme}")
     if task.spec.extras:
@@ -291,6 +299,43 @@ def results(
     console.print(f"[dim]Report: {escape(str(run_dir / 'report.md'))}  |  {escape(str(run_dir / 'report.html'))}[/]")
     if data["tracker"] and data["tracker"].get("url"):
         console.print(f"[dim]MLflow: {escape(data['tracker']['url'])}[/]")
+
+
+@app.command()
+def experiments():
+    """List the MLflow experiments (one per problem) with their number of orbit runs."""
+    import datetime
+
+    from .tracking import configure_mlflow_env
+
+    configure_mlflow_env()
+    try:
+        import mlflow
+
+        client = mlflow.MlflowClient()
+        rows = []
+        for exp in client.search_experiments():
+            runs, token = 0, None
+            while True:
+                page = client.search_runs([exp.experiment_id], max_results=1000, page_token=token)
+                runs += sum("mlflow.parentRunId" not in r.data.tags for r in page)
+                token = page.token
+                if not token:
+                    break
+            if exp.name == "Default" and not runs:
+                continue
+            rows.append((exp, runs))
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Could not reach MLflow:[/] {escape(str(e)[:300])}")
+        raise typer.Exit(1)
+    table = Table(title="MLflow experiments")
+    for col in ("name", "id", "runs", "last updated"):
+        table.add_column(col, overflow="fold")
+    for exp, runs in sorted(rows, key=lambda r: r[0].last_update_time or 0, reverse=True):
+        updated = (datetime.datetime.fromtimestamp(exp.last_update_time / 1000).strftime("%Y-%m-%d %H:%M")
+                   if exp.last_update_time else "")
+        table.add_row(escape(exp.name), exp.experiment_id, str(runs), updated)
+    console.print(table)
 
 
 @app.command()

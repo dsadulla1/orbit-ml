@@ -90,8 +90,21 @@ def test_collect_from_mlflow_matches_the_run_folder(clf_csv, tmp_path, monkeypat
         assert remote["best"]["id"] == journal.best_id == 1
         assert remote["best"]["test_score"] == pytest.approx(journal.get(1).test_metric)
         assert remote["task"]["folds"] == 3 and local["tracker"]["run_id"] == info["run_id"]
+        assert local["tracker"]["experiment_name"] == "orbit-results"
     finally:
         mlflow.set_tracking_uri(None)
+
+
+def test_html_names_the_mlflow_experiment(clf_csv, tmp_path):
+    task, _ = _run(tmp_path, clf_csv)
+    (task.run_dir / "tracking.json").write_text(json.dumps({
+        "uri": "http://localhost:5000", "experiment_id": "3", "run_id": "abc",
+        "experiment_name": "wine <b>"}))
+    page = html_report.render(results.collect(task.run_dir))
+    assert "Open in MLflow: wine &lt;b&gt;" in page
+    (task.run_dir / "tracking.json").write_text(json.dumps({
+        "uri": "http://localhost:5000", "experiment_id": "3", "run_id": "abc"}))
+    assert "Open in MLflow</a>" in html_report.render(results.collect(task.run_dir))
 
 
 def test_damaged_tracking_file_and_bad_run_ids(clf_csv, tmp_path):

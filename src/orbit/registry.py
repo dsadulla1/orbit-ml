@@ -8,8 +8,10 @@ sandbox by `export_best` and is only loaded where the model is served.
 
 Nothing in this module raises for MLflow problems: they come back in `RegistryResult.message`.
 """
+import contextlib
 import json
 import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -159,6 +161,22 @@ def _log_model(mlflow, export, input_dir: Path, name: str, run_id: str):
             registered_model_name=name)
 
 
+@contextlib.contextmanager
+def _quiet():
+    """Hide MLflow's console chatter while logging: its notes that the host's libraries differ from
+    the pinned ones (expected: the model targets the serving container, not this machine), the
+    type-hint advice, and the registration progress lines."""
+    logger = logging.getLogger("mlflow")
+    level = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        logger.setLevel(level)
+
+
 def register_model(run_dir: Path, export, model_name: str | None = None, promote: bool = True,
                    force_champion: bool = False) -> RegistryResult:
     """Register `export.model_path` as a new version of `model_name` (default: the experiment's
@@ -183,7 +201,8 @@ def register_model(run_dir: Path, export, model_name: str | None = None, promote
         previous = mlflow.get_tracking_uri()
         mlflow.set_tracking_uri(uri)  # the registry follows it
         try:
-            logged = _log_model(mlflow, export, input_dir, name, run_id)
+            with _quiet():
+                logged = _log_model(mlflow, export, input_dir, name, run_id)
         finally:
             mlflow.set_tracking_uri(previous)
         version = int(logged.registered_model_version)

@@ -134,3 +134,18 @@ def test_nonnegative_metrics_tell_the_model_to_clip(tmp_path):
     assert ">= 0" in rule and "expm1" in rule
     plain = prediction_rule(prepare(TaskSpec(str(path), "spend", metric="rmse", folds=1), tmp_path / "b"))
     assert ">= 0" not in plain
+
+
+def test_export_prompt_formats(clf_csv, tmp_path):
+    from types import SimpleNamespace
+    from orbit.prompts import export_prompt
+    from orbit.task import TaskSpec, prepare
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=3, id_column="f0"), tmp_path / "run")
+    node = SimpleNamespace(id=4, metric=0.91234, plan="{braces} in a plan", code="d = {}\nprint('{x}')")
+    text = export_prompt(task, node)
+    for word in ("Preprocessor", "pickle.dump", "model.pkl", "protocol=4", "#4", "0.9123",
+                 "d = {}", "'f0'", "orbit_id"):
+        assert word in text
+    assert "run 3 times" not in text and "Previous export attempt" not in text
+    retry = export_prompt(task, node, "print(1)", "KeyError: boom")
+    assert "Previous export attempt" in retry and "KeyError: boom" in retry and "print(1)" in retry

@@ -204,9 +204,7 @@ class Agent:
         (workdir / "response.md").write_text(reply.text, encoding="utf-8")
 
         if node.code is None:
-            node.error = ("The reply was cut off inside a code block (output token limit?)."
-                          if reply.text.count("```") % 2 else
-                          "The reply contained no ```python code block.")
+            node.error = prompts.missing_code_message(reply.text)
         else:
             self._run_folds(node, workdir)
 

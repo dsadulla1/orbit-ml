@@ -116,6 +116,64 @@ Fix the root cause while keeping the experiment's intent, and check the rest of 
 the same mistake. Do not repeat a fix that has already failed; if unsure, switch to a simpler \
 approach. Return the full corrected script."""
 
+EXPORT = """{data}
+
+## Best experiment (#{node_id}, validation score {score:.4f})
+PLAN: {plan}
+```python
+{code}
+```
+
+## Export task
+This approach is final. Rewrite the script above so that it:
+1. trains on ALL rows of data/train.csv with the same approach and settings;
+2. builds ONE fitted object `model`: a scikit-learn Pipeline (or estimator) whose `predict` (and \
+`predict_proba` when the metric needs probabilities) takes a pandas DataFrame with the ORIGINAL \
+feature columns of data/test.csv without {id_col!r} (raw text columns and NaN allowed) and does ALL \
+preprocessing and feature engineering itself. Use only classes importable from scikit-learn, \
+lightgbm, xgboost, numpy, pandas or orbit_helpers. `orbit_helpers.Preprocessor(fill=True, \
+drop=[...])` does the text encoding and imputation inside a Pipeline (fill=False keeps NaN for \
+LightGBM / XGBoost). Identifier column(s) to drop inside the pipeline: {id_columns}. NO lambdas, no \
+classes or functions defined in the script, and no helper function defined in the script that the \
+pipeline calls: anything defined in __main__ cannot be loaded by another program. Pickle with \
+plain `pickle`, not joblib;
+3. saves it with `import pickle; pickle.dump(model, open("model.pkl", "wb"), protocol=4)`;
+4. writes predictions.csv for data/test.csv by calling that model on the raw test features \
+(`d.test_df` without {id_col!r}, same row order), with the same prediction rule as before. \
+`from orbit_helpers import load` and `d.save(pred)` write the file.
+```python
+import sys; sys.path.insert(0, "data")
+import pickle
+from orbit_helpers import load, Preprocessor
+from sklearn.pipeline import Pipeline
+d = load()
+X = d.train_df.drop(columns=[d.target])
+model = Pipeline([("prep", Preprocessor(fill=True, drop=[...])), ("model", ...)]).fit(X, d.y_train)
+pickle.dump(model, open("model.pkl", "wb"), protocol=4)
+d.save(model.predict_proba(d.test_df.drop(columns=["orbit_id"])))  # or .predict(...), see the rule
+```
+The saved model is reloaded in a fresh process and must reproduce predictions.csv from the raw \
+rows. Return the full script."""
+
+EXPORT_RETRY = """
+
+## Previous export attempt (failed)
+```python
+{code}
+```
+
+## Error
+```
+{error}
+```
+Fix the root cause. Do not repeat a fix that has already failed."""
+
+
+def missing_code_message(reply_text: str) -> str:
+    """Why a reply had no usable code block."""
+    return ("The reply was cut off inside a code block (output token limit?)."
+            if reply_text.count("```") % 2 else "The reply contained no ```python code block.")
+
 
 def prediction_rule(task) -> str:
     if task.metric.needs_proba:
@@ -136,16 +194,16 @@ def system_prompt(task, timeout: int, cpus: float) -> str:
                          timeout=timeout, cpus=max(1, int(cpus)))
 
 
-def data_section(task) -> str:
+def data_section(task, export: bool = False) -> str:
     direction = "higher is better" if task.metric.greater_is_better else "lower is better"
     goal = task.spec.goal or f"predict {task.spec.target!r} as accurately as possible"
     scoring = ""
-    if task.n_folds > 1:
+    if task.n_folds > 1 and not export:
         scoring = (f"Scoring: your script is run {task.n_folds} times, each on a different "
                    f"train/test split of the same data (data/train.csv and data/test.csv change "
                    f"between runs); the score is the mean over the runs. Do not hard-code row "
                    f"counts or ids.")
-    if task.spec.time_col:
+    if task.spec.time_col and not export:
         scoring = (scoring + " " if scoring else "") + (
             f"Validation and test rows are later in time (column {task.spec.time_col!r}) than the "
             f"training rows of the same run, so features must not rely on information from after a "
@@ -162,6 +220,18 @@ def data_section(task) -> str:
     return DATA_SECTION.format(goal=goal, metric=task.metric_name, direction=direction,
                                baseline=task.baseline, profile=task.profile, scoring=scoring,
                                extras=extras)
+
+
+def export_prompt(task, node, previous_code: str | None = None, error: str | None = None) -> str:
+    """The user prompt for rewriting `node`'s script as an exported model; with `previous_code` and
+    `error` it also shows the last failed export attempt."""
+    ids = [task.spec.id_column] if task.spec.id_column else []
+    text = EXPORT.format(data=data_section(task, export=True), node_id=node.id, score=node.metric,
+                         plan=node.plan, code=node.code, id_col=ID_COL,
+                         id_columns=", ".join(map(repr, ids)) or "none declared")
+    if previous_code is not None:
+        text += EXPORT_RETRY.format(code=previous_code, error=error)
+    return text
 
 
 def history_section(nodes, max_items: int = 15) -> str:

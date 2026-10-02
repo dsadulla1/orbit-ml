@@ -1,3 +1,6 @@
+import json
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -366,3 +369,55 @@ def test_profile_flags_text_columns(tmp_path):
     text = prepare(TaskSpec(str(path), "y", folds=1), tmp_path / "run").profile
     line = {ln.split(" | ")[0]: ln for ln in text.splitlines() if " | " in ln}
     assert "TEXT: encode" in line["country"] and "TEXT" not in line["n"] and "TEXT" not in line["flag"]
+
+
+# ---- export input -------------------------------------------------------------------------
+
+def test_load_labeled_matches_prepare(tmp_path):
+    from orbit.task import load_labeled
+    df = pd.DataFrame({"f": range(10), "y": [0.0, 1.0] * 4 + [np.nan, np.nan]})
+    path = tmp_path / "d.csv"
+    df.to_csv(path, index=False)
+    out = load_labeled(TaskSpec(str(path), "y"))
+    assert len(out) == 8 and str(out["y"].dtype) == "int64"
+    with pytest.raises(ValueError, match="not found"):
+        load_labeled(TaskSpec(str(path), "nope"))
+
+
+@pytest.mark.parametrize("folds", [1, 3])
+def test_export_input_layout(clf_csv, tmp_path, folds):
+    from orbit.task import HELPER_FILE, META_FILE, prepare_export_input
+    extra = tmp_path / "lookup.csv"
+    pd.DataFrame({"k": [1, 2], "v": ["a", "b"]}).to_csv(extra, index=False)
+    spec = TaskSpec(str(clf_csv), "label", folds=folds, extras=[str(extra)])
+    task = prepare(spec, tmp_path / "run")
+    out = prepare_export_input(task, n_check=50)
+    assert out == tmp_path / "run" / "export" / "input"
+    source = pd.read_csv(clf_csv)
+    train, test = pd.read_csv(out / "train.csv"), pd.read_csv(out / "test.csv")
+    pd.testing.assert_frame_equal(train, source)             # all labeled rows, incl. the test split
+    assert list(test.columns) == ["orbit_id"] + [c for c in source.columns if c != "label"]
+    assert len(test) == 50 and test["orbit_id"].is_unique
+    assert set(test["f0"].round(6)) <= set(source["f0"].round(6))   # CSV floats may differ by an ulp
+    assert pd.read_csv(out / "extra" / "lookup.csv").shape == (2, 2)
+    assert (out / META_FILE).exists() and (out / HELPER_FILE).exists()
+    meta = json.loads((out / META_FILE).read_text())
+    assert meta["target"] == "label" and meta["extra_names"] == ["lookup"]
+    assert not list(out.rglob("labels.csv"))
+    again = prepare_export_input(task, n_check=50)
+    assert pd.read_csv(again / "test.csv").equals(test)      # seeded sample
+    assert len(pd.read_csv(prepare_export_input(task, n_check=10_000) / "test.csv")) == len(source)
+
+
+def test_export_input_time_ordered_and_missing_target_rows(tmp_path):
+    from orbit.task import prepare_export_input
+    path = _time_csv(tmp_path)
+    df = pd.read_csv(path)
+    df.loc[0, "label"] = None                                 # unlabeled rows are not exported
+    df.to_csv(path, index=False)
+    task = prepare(TaskSpec(str(path), "label", folds=1, time_col="when"), tmp_path / "run")
+    out = prepare_export_input(task)
+    train = pd.read_csv(out / "train.csv")
+    assert len(train) == len(df) - 1
+    assert train["when"].is_monotonic_increasing
+    assert set(pd.read_csv(out / "test.csv").columns) == {"orbit_id", "f0", "f1", "when"}

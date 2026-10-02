@@ -229,7 +229,9 @@ def _time_split(df: pd.DataFrame, spec: TaskSpec):
     return df.iloc[:n_train], df.iloc[n_train:n_train + n_val], df.iloc[n_train + n_val:]
 
 
-def prepare(spec: TaskSpec, run_dir: Path) -> Task:
+def load_labeled(spec: TaskSpec) -> pd.DataFrame:
+    """Every row of the primary table that has a target value, as `prepare` splits them: ordered by
+    `time_col` when set, and integer targets restored (missing values make pandas read 0/1 as floats)."""
     df = read_table(Path(spec.data_path))
     if spec.target not in df.columns:
         raise ValueError(f"Target column {spec.target!r} not found. Columns: {list(df.columns)}")
@@ -240,8 +242,13 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         df = _order_by_time(df, spec)
     y = df[spec.target]
     if pd.api.types.is_float_dtype(y) and (y == y.round()).all():
-        # Missing values make pandas read integer targets (e.g. 0/1) as floats; restore them.
-        df[spec.target] = y = y.astype("int64")
+        df[spec.target] = y.astype("int64")
+    return df
+
+
+def prepare(spec: TaskSpec, run_dir: Path) -> Task:
+    df = load_labeled(spec)
+    y = df[spec.target]
 
     kind = infer_kind(y)
     classes = sorted(map(str, y.unique())) if kind == "classification" else []
@@ -355,6 +362,36 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     )
     task.save()
     return task
+
+
+def prepare_export_input(task: Task, n_check: int = 200) -> Path:
+    """Write `run_dir/export/input/`, the data directory for refitting the best script on everything.
+
+    train.csv holds ALL labeled rows of the primary table (features + target), read again from the
+    user's source file. test.csv holds up to `n_check` of those rows (a seeded sample) as features
+    plus `orbit_id`, without labels: they are in-sample and only check that the saved model
+    reproduces the script's predictions. The extra tables, orbit_meta.json and orbit_helpers.py are
+    written as for a fold.
+
+    Unlike the fold directories, this one contains labels of rows that were validation or test rows
+    during the search. That is fine: scoring is finished by then, the labels come from the user's own
+    file, and `hidden/` is never read or mounted."""
+    spec = task.spec
+    df = load_labeled(spec)
+    features = [c for c in df.columns if c != spec.target]
+    out = task.run_dir / "export" / "input"
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out / "train.csv", index=False)
+    check = df[features].sample(n=min(n_check, len(df)), random_state=spec.seed)
+    check.insert(0, ID_COL, np.arange(1, len(check) + 1))
+    check.to_csv(out / "test.csv", index=False)
+    extras = _read_extras(spec.extras)
+    for name, frame in extras.items():
+        (out / "extra").mkdir(exist_ok=True)
+        frame.to_csv(out / "extra" / f"{name}.csv", index=False)
+    _write_helper_files(out, spec, task.kind, task.metric, task.positive_label, task.classes,
+                        1, list(extras))
+    return out
 
 
 def _write_helper_files(out: Path, spec: TaskSpec, kind: str, metric: Metric, positive_label,

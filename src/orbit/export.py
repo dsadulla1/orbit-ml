@@ -151,7 +151,8 @@ def export_best(task: Task, journal: Journal, llm, sandbox: Sandbox, exec_timeou
     export_dir = task.run_dir / "export"
     try:
         for stale in [export_dir / MODEL_FILE, export_dir / "sample_input.csv",
-                      export_dir / "sample_predictions.csv", export_dir / "export.json"]:
+                      export_dir / "sample_predictions.csv", export_dir / "export.json",
+                      export_dir / "registry.json"]:
             stale.unlink(missing_ok=True)
         input_dir = prepare_export_input(task)
         ids = pd.Index(pd.read_csv(input_dir / "test.csv")[ID_COL])

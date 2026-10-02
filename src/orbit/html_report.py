@@ -156,6 +156,7 @@ TEMPLATE = """<!doctype html>
 <h1>{{ title }}</h1>
 <p class="sub">{{ subtitle }}</p>
 <p class="meta">{{ meta }}</p>
+{% if model %}<p class="meta">{% if model.version is not none %}Registered model {% if model.url %}<a href="{{ model.url }}">{{ model.name }}</a>{% else %}{{ model.name }}{% endif %}, version {{ model.version }}{% if model.aliases %}, alias {{ model.aliases | join(', ') }}{% endif %}{% elif model.exported %}Model exported, not registered{% else %}Model export failed{% if model.error %}: {{ model.error }}{% endif %}{% endif %}</p>{% endif %}
 
 <div class="tiles">
 {% for t in tiles %}<div class="tile"><div class="k">{{ t.k }}</div><div class="v">{{ t.v }}</div><div class="d">{{ t.d }}</div></div>
@@ -222,5 +223,5 @@ def render(data: dict) -> str:
         narrative=narrative_html(data["narrative"]) if data["narrative"] else "", check=data["narrative_check"],
         chart=score_chart(exps, task["baseline"], best_id, task["greater_is_better"], task["metric"]),
         progress=progress_chart(exps, task["greater_is_better"], task["metric"]), folds=task["folds"],
-        rows=rows, code=(data.get("best") or {}).get("code"), script=(data.get("best") or {}).get("script"),
+        model=data.get("model"), rows=rows, code=(data.get("best") or {}).get("code"), script=(data.get("best") or {}).get("script"),
         notes=prob["notes"], link=tracker.get("url"), traces_link=tracker.get("traces_url"), link_label=tracker.get("experiment_name"), footer=f"orbit run {data['run']}")

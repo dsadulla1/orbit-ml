@@ -9,6 +9,7 @@ import json
 import re
 import statistics
 from pathlib import Path
+from urllib.parse import quote
 
 from . import report as report_mod
 from .agent import Journal
@@ -48,6 +49,31 @@ def _tracker_link(run_dir: Path) -> dict | None:
         return None  # a damaged tracking.json only costs the link
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _model_info(run_dir: Path, tracker: dict | None) -> dict | None:
+    """The exported model and its registry entry, from export/export.json and export/registry.json."""
+    export, registry = (_read_json(run_dir / "export" / n) for n in ("export.json", "registry.json"))
+    if not export and not registry:
+        return None
+    info = {"exported": bool(export.get("ok")), "attempts": export.get("attempts"),
+            "experiment": export.get("node_id"), "model_bytes": export.get("model_bytes"),
+            "error": export.get("error"), "notes": export.get("notes") or [],
+            "name": registry.get("name"), "version": registry.get("version"),
+            "aliases": registry.get("aliases") or [], "promoted": bool(registry.get("promoted")),
+            "message": registry.get("message"), "url": None}
+    uri = (tracker or {}).get("uri", "")
+    if info["version"] is not None and info["name"] and uri.startswith("http"):
+        info["url"] = f"{uri.rstrip('/')}/#/models/{quote(info['name'], safe='')}"
+    return info
+
+
 def collect(run_dir: Path) -> dict:
     run_dir = Path(run_dir)
     task, journal = Task.load(run_dir), Journal.load(run_dir / "journal.json")
@@ -64,6 +90,7 @@ def collect(run_dir: Path) -> dict:
         "peak_mem_mb": n.peak_mem_mb, "cpu_pct": n.cpu_pct,
     } for n in journal.nodes]
     best = journal.get(journal.best_id) if journal.best_id else None
+    tracker = _tracker_link(run_dir)
     return {
         "run": run_dir.name,
         "problem": {"goal": spec.goal, "eval": spec.eval_text, "sources": spec.sources,
@@ -77,7 +104,8 @@ def collect(run_dir: Path) -> dict:
         "experiments": experiments,
         "best": None if not best else {
             "id": best.id, "code": best.code, "script": f"nodes/{best.id:03d}/solution.py"},
-        "stop_reason": journal.stop_reason, "tracker": _tracker_link(run_dir),
+        "stop_reason": journal.stop_reason, "tracker": tracker,
+        "model": _model_info(run_dir, tracker),
     }
 
 

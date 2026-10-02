@@ -117,6 +117,8 @@ def run(
                                    help="MLflow experiment / W&B project to log to (default: named "
                                         "after the problem)"),
     seed: int = typer.Option(42),
+    no_export: bool = typer.Option(False, "--no-export",
+                                   help="Skip the final model export and registration"),
 ):
     """Solve a prediction problem: orbit builds and compares models, then reports.
 
@@ -182,6 +184,55 @@ def run(
     agent = Agent(task, llm, DockerSandbox(sb_settings), cfg, tracker=trk, on_node=on_node)
     journal = agent.run()
     _write_report(task, journal, llm, trk)
+    if trk.name == "mlflow" and not no_export:
+        _export_model(task, journal, llm, DockerSandbox(sb_settings), cfg.exec_timeout, cfg.cpus)
+
+
+def _model_line(model: dict) -> str:
+    """One plain-text line about the exported model, from `results.collect()["model"]`."""
+    if model.get("version") is not None:
+        aliases = f", alias {', '.join(model['aliases'])}" if model.get("aliases") else ""
+        return f"{model['name']} version {model['version']}{aliases}"
+    if model.get("exported"):
+        attempts = model.get("attempts") or 0
+        return f"exported (experiment #{model.get('experiment')}, {attempts} attempt{'s' * (attempts != 1)})" \
+               + (f", not registered: {model['message']}" if model.get("message") else ", not registered")
+    return f"export failed: {model.get('error') or 'unknown error'}"
+
+
+def _export_model(task: Task, journal: Journal, llm, sandbox, exec_timeout: int, cpus: float,
+                  register: bool = True, model_name: str | None = None, force_champion: bool = False,
+                  attempts: int | None = None) -> bool:
+    """Export the best experiment as one verified model and register it in MLflow. Problems are
+    printed as warnings and never raise; returns whether the export worked."""
+    from .export import export_best
+    from .registry import register_model
+
+    console.print("\n[dim]Exporting the best model (refit on all labeled rows) ...[/]")
+    try:
+        res = export_best(task, journal, llm, sandbox, exec_timeout, cpus,
+                          **({"max_attempts": attempts} if attempts else {}))
+        if not res.ok:
+            console.print(f"[yellow]Model export failed:[/] {escape(res.error or 'unknown error')}")
+            for note in res.notes:
+                console.print(f"  [dim]{escape(note)}[/]")
+            return False
+        size = res.model_path.stat().st_size / 1e6
+        console.print(f"Model: exported (experiment #{res.node_id}, {res.attempts} attempt"
+                      f"{'s' * (res.attempts != 1)}, {size:.1f} MB) -> {escape(str(res.model_path))}")
+        if not register:
+            return True
+        reg = register_model(task.run_dir, res, model_name=model_name, force_champion=force_champion)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Model export interrupted; the run's results are intact.[/]")
+        return False
+    if reg.version is None:
+        console.print(f"[yellow]Model registration failed:[/] {escape(reg.message)}")
+        return True
+    console.print(f"Registered model {escape(reg.name)} version {reg.version}"
+                  + (f", alias {escape(', '.join(reg.aliases))}" if reg.aliases else ""))
+    console.print(f"  [dim]{escape(reg.message)}[/]")
+    return True
 
 
 def _short(text, limit=70):
@@ -297,6 +348,9 @@ def results(
                       escape(e["plan"][:110]) if ok else f"[red]{escape(e['error'][:110])}[/]")
     console.print(table)
     console.print(f"[dim]Report: {escape(str(run_dir / 'report.md'))}  |  {escape(str(run_dir / 'report.html'))}[/]")
+    model = data.get("model")
+    if model:
+        console.print(f"Model: {escape(_model_line(model))}")
     if data["tracker"] and data["tracker"].get("url"):
         console.print(f"[dim]MLflow: {escape(data['tracker']['url'])}[/]")
 
@@ -336,6 +390,84 @@ def experiments():
                    if exp.last_update_time else "")
         table.add_row(escape(exp.name), exp.experiment_id, str(runs), updated)
     console.print(table)
+
+
+@app.command()
+def export(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False, help="A finished run folder"),
+    model_name: str = typer.Option(None, "--model-name",
+                                   help="Registered model name (default: the run's MLflow experiment)"),
+    no_register: bool = typer.Option(False, "--no-register", help="Export only; do not use MLflow"),
+    force_champion: bool = typer.Option(False, "--force-champion",
+                                        help="Move the champion alias to the new version regardless of score"),
+    attempts: int = typer.Option(3, min=1, help="Attempts at a verified export"),
+):
+    """Refit a run's best experiment on all labeled rows, verify it and register it in MLflow.
+
+    The model lands in RUN_DIR/export/model.pkl; with a tracking.json it is also registered as a
+    new version of an MLflow model, and the alias `champion` moves to it when its validation
+    score is at least as good as the current champion's.
+
+    Examples:
+      orbit export runs/20261001-120000-wine
+      orbit export runs/20261001-120000-wine --model-name wine-quality --force-champion
+    """
+    from .sandbox import DockerSandbox, check_docker
+
+    sb_settings = SandboxSettings()
+    ok, msg = check_docker(sb_settings)
+    if not ok:
+        console.print(f"[red]Sandbox unavailable:[/] {escape(msg)}")
+        raise typer.Exit(1)
+    llm = _llm()
+    task, journal = Task.load(run_dir), Journal.load(run_dir / "journal.json")
+    if not _export_model(task, journal, llm, DockerSandbox(sb_settings), sb_settings.timeout,
+                         sb_settings.cpus, register=not no_register, model_name=model_name,
+                         force_champion=force_champion, attempts=attempts):
+        raise typer.Exit(1)
+
+
+@app.command()
+def models():
+    """List the models registered in MLflow with the version that carries the alias champion."""
+    from .tracking import configure_mlflow_env
+
+    configure_mlflow_env()
+    try:
+        import mlflow
+
+        client = mlflow.MlflowClient()
+        rows = []
+        for model in client.search_registered_models(max_results=1000):
+            versions = client.search_model_versions(f"name = '{model.name.replace(chr(39), chr(39) * 2)}'")
+            latest = max((int(v.version) for v in versions), default=None)
+            champion = champion_tags = None
+            if "champion" in (model.aliases or {}):
+                champion = int(model.aliases["champion"])
+                champion_tags = next((v.tags for v in versions if int(v.version) == champion), {})
+            rows.append((model.name, latest, champion, champion_tags or {}))
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Could not reach MLflow:[/] {escape(str(e)[:300])}")
+        raise typer.Exit(1)
+    if not rows:
+        console.print("No registered models yet. `orbit run` registers one after each search "
+                      "(or use `orbit export RUN_DIR`).")
+        return
+    table = Table(title="Registered models")
+    for col in ("name", "latest", "champion", "metric", "validation", "test"):
+        table.add_column(col, overflow="fold")
+    for name, latest, champion, tags in sorted(rows):
+        table.add_row(escape(name), "" if latest is None else str(latest),
+                      "" if champion is None else str(champion), escape(tags.get("orbit.metric", "")),
+                      escape(_score(tags.get("orbit.val_score"))), escape(_score(tags.get("orbit.test_score"))))
+    console.print(table)
+
+
+def _score(text) -> str:
+    try:
+        return f"{float(text):.4f}"
+    except (TypeError, ValueError):
+        return ""
 
 
 @app.command()

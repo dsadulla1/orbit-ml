@@ -15,6 +15,8 @@ dependencies = [
     "mlflow>=3.5.1",
     "jinja2>=3.1",
     "openpyxl>=3.1",
+    "psutil>=5.9",
+    "nvidia-ml-py>=12",
 ]
 
 [project.optional-dependencies]

@@ -49,6 +49,10 @@ def tracing_enabled() -> bool:
     return os.environ.get("ORBIT_TRACING", "").strip().lower() not in ("off", "0", "false", "no")
 
 
+def system_metrics_enabled() -> bool:
+    return os.environ.get("ORBIT_SYSTEM_METRICS", "").strip().lower() not in ("off", "0", "false", "no")
+
+
 def resolve_experiment(explicit: str | None, sources: list[str], name: str | None = None) -> str:
     """The MLflow experiment / W&B project for a run: `--experiment`, then ORBIT_EXPERIMENT, then a
     name derived from the problem (the sanitised `--name`, else the first data source)."""
@@ -117,6 +121,7 @@ def configure_mlflow_env() -> None:
     # unreachable tracker costs seconds per logged experiment, not minutes.
     for key, value in MLFLOW_FAIL_FAST.items():
         os.environ.setdefault(key, value)
+    os.environ.setdefault("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL", "5")  # seconds
 
 
 class NullTracker:
@@ -223,12 +228,24 @@ class MLflowTracker:
             client.restore_experiment(client.get_experiment_by_name(self.experiment).experiment_id)
             mlflow.set_experiment(self.experiment)
 
+    def _start_parent(self, run_name: str):
+        """Start the parent run with host system metrics (CPU, memory, GPUs), unless switched off.
+        If that fails, start it without rather than lose tracking."""
+        if system_metrics_enabled():
+            try:
+                return self.mlflow.start_run(run_name=run_name, log_system_metrics=True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("tracking: system metrics unavailable, starting without: %s", e)
+                if self.mlflow.active_run() is not None:
+                    self.mlflow.end_run()
+        return self.mlflow.start_run(run_name=run_name)
+
     @_safe
     def start(self, task, config, llm_model):
         mlflow = self.mlflow
         self._set_experiment()
         self._autolog_llm_calls()
-        self.parent = mlflow.start_run(run_name=task.run_dir.name)
+        self.parent = self._start_parent(task.run_dir.name)
         for key, value in _run_tags(task, config).items():
             try:
                 mlflow.set_tags({key: value})
@@ -262,6 +279,10 @@ class MLflowTracker:
                        "completion_tokens": node.completion_tokens}
             if node.metric is not None:
                 metrics["val_score"] = node.metric
+            if node.peak_mem_mb is not None:
+                metrics["peak_mem_mb"] = node.peak_mem_mb
+            if node.cpu_pct is not None:
+                metrics["cpu_pct_mean"] = node.cpu_pct
             if len(node.fold_scores) > 1:
                 metrics["val_score_std"] = statistics.stdev(node.fold_scores)
                 metrics.update({f"val_score_fold_{k}": v for k, v in enumerate(node.fold_scores, 1)})

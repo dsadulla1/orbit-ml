@@ -333,3 +333,72 @@ def test_null_tracker_span_is_a_no_op():
     with NullTracker().span("x", a=1) as span:
         span.set(b=2)
         span.set_trace_tags(c="3")
+
+
+def test_log_node_records_container_resources(tmp_path, mlflow_uri):
+    import mlflow
+    from orbit.agent import Node
+
+    tracker = MLflowTracker(experiment="orbit-resources")
+    mlflow.set_experiment("orbit-resources")
+    tracker.parent = mlflow.start_run(run_name="parent")
+    tracker.log_node(Node(id=1, stage="draft", parent=None, metric=0.9, peak_mem_mb=640.0, cpu_pct=150.0),
+                     tmp_path)
+    tracker.log_node(Node(id=2, stage="draft", parent=None, metric=0.8), tmp_path)
+    runs = {r.info.run_name: r.data.metrics for r in mlflow.search_runs(
+        experiment_names=["orbit-resources"], output_format="list")}
+    assert runs["exp-001-draft"]["peak_mem_mb"] == 640.0 and runs["exp-001-draft"]["cpu_pct_mean"] == 150.0
+    assert "peak_mem_mb" not in runs["exp-002-draft"] and "cpu_pct_mean" not in runs["exp-002-draft"]
+
+
+def _capture_start_run(monkeypatch, fail_with=None):
+    import mlflow
+
+    calls = []
+    real = mlflow.start_run
+
+    def start_run(**kwargs):
+        calls.append(kwargs)
+        if fail_with and kwargs.get("log_system_metrics"):
+            raise fail_with
+        return real(**kwargs)
+
+    monkeypatch.setattr(mlflow, "start_run", start_run)
+    return calls
+
+
+def test_system_metrics_are_on_by_default(clf_csv, tmp_path, mlflow_uri, monkeypatch):
+    monkeypatch.delenv("ORBIT_SYSTEM_METRICS", raising=False)
+    calls = _capture_start_run(monkeypatch)
+    _start(clf_csv, tmp_path, "orbit-sys")
+    assert calls[0]["log_system_metrics"] is True
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "0", "false", "No"])
+def test_system_metrics_can_be_switched_off(clf_csv, tmp_path, mlflow_uri, monkeypatch, value):
+    monkeypatch.setenv("ORBIT_SYSTEM_METRICS", value)
+    calls = _capture_start_run(monkeypatch)
+    _start(clf_csv, tmp_path, "orbit-sys")
+    assert len(calls) == 1 and not calls[0].get("log_system_metrics")
+
+
+def test_run_starts_without_system_metrics_when_they_fail(clf_csv, tmp_path, mlflow_uri,
+                                                         monkeypatch, caplog):
+    monkeypatch.delenv("ORBIT_SYSTEM_METRICS", raising=False)
+    calls = _capture_start_run(monkeypatch, fail_with=RuntimeError("no psutil"))
+    task, tracker = _start(clf_csv, tmp_path, "orbit-sys")
+    assert [bool(c.get("log_system_metrics")) for c in calls] == [True, False]
+    assert tracker.parent is not None and "no psutil" in caplog.text
+    assert (task.run_dir / "tracking.json").exists()
+
+
+def test_system_metrics_sampling_interval_default(monkeypatch):
+    import os
+
+    monkeypatch.setenv("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL", "x")  # registers it for cleanup
+    monkeypatch.delenv("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL")
+    MLflowTracker()
+    assert os.environ["MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL"] == "5"
+    monkeypatch.setenv("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL", "2")
+    MLflowTracker()
+    assert os.environ["MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL"] == "2"

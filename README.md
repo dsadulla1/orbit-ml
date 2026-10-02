@@ -80,8 +80,8 @@ runs/20261001-120000-breast_cancer/
 
 | Command | What it does |
 |---|---|
-| `orbit explore DATA -t TARGET` | Print the data profile the agent will see |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K]` | Solve a problem: run a search |
+| `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--name NAME]` | Solve a problem: run a search |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
@@ -89,8 +89,12 @@ runs/20261001-120000-breast_cancer/
 
 ### Describing a problem
 
-`DATA` can be any mix of CSV/TSV files, folders, zip files and `http(s)` URLs; text files such as a
-data description are read and shown to the model. `--goal` states the problem in plain language and
+`DATA` can be any mix of CSV/TSV files, Excel workbooks (`.xlsx`), folders, zip files and `http(s)`
+URLs; text files such as a data description are read and shown to the model. Each Excel sheet that
+has data becomes a table (converted to CSV in the run folder; old `.xls` files must be saved as
+`.xlsx` or CSV first). `orbit explore` takes the same sources, so you can check what orbit finds
+before a run. Run folders are named `<timestamp>-<name>`; set the name with `--name` (default: taken
+from the first source). A setup that fails leaves no run folder behind. `--goal` states the problem in plain language and
 `--eval` says how to judge it, either as a metric name or in words ("RMSE between log prices").
 Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
 answer against the files. Tables that don't hold the target are made available to the generated

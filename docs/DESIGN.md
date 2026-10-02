@@ -11,7 +11,7 @@
 
 | Module | Responsibility |
 |---|---|
-| `sources.py` | Fetch/copy local files, folders, zips and URLs into the run folder (size caps, safe extraction); collect tables and documents |
+| `sources.py` | Fetch/copy local files, folders, zips and URLs into the run folder (size caps, safe extraction); collect tables (CSV/TSV, and each `.xlsx` sheet converted to CSV) and documents |
 | `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry |
 | `problem.py` | Resolve sources, plan, and prepare the task in one call |
 | `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
@@ -24,7 +24,7 @@
 | `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
 | `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
 | `html_report.py` | Standalone `report.html` (Jinja, inline SVG charts, no scripts or external assets) |
-| `cli.py` | `explore`, `run`, `results`, `compare`, `summarize`, `doctor` |
+| `cli.py` | `explore` (same sources as `run`), `run`, `results`, `compare`, `summarize`, `doctor` |
 
 ## Data flow and label hiding
 

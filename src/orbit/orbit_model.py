@@ -7,6 +7,7 @@ import json
 import pickle
 
 import mlflow.pyfunc
+import numpy as np
 import pandas as pd
 from mlflow.models import set_model
 
@@ -42,6 +43,8 @@ class OrbitModel(mlflow.pyfunc.PythonModel):
             pred = self.model.predict_proba(rows)[:, column]
         else:
             pred = self.model.predict(rows)
+            if self.meta.get("needs_nonneg"):  # the metric rejects negative values
+                pred = np.clip(np.asarray(pred, dtype=float), 0, None)
         return pd.Series(pred, name="prediction").reset_index(drop=True)
 
 

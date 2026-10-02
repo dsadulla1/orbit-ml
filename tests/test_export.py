@@ -244,3 +244,118 @@ def test_hidden_directory_is_never_given_to_the_sandbox(clf_csv, tmp_path, orbit
     llm = ScriptedLLM([CLF])
     res = export_best(task, _journal(), llm, Spy(), 120, 1)
     assert res.ok and seen == [task.run_dir / "export" / "input"] * 2    # script, then verifier
+
+
+LOG_TARGET = """PLAN: Ridge on log1p of the target, inside the pickled object.
+```python
+import sys; sys.path.insert(0, "data")
+import numpy as np
+import pickle
+from orbit_helpers import load, Preprocessor, expm1_nonneg
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import Pipeline
+d = load()
+X = d.train_df.drop(columns=[d.target])
+pipe = Pipeline([("prep", Preprocessor(drop=[])), ("m", Ridge())])
+model = TransformedTargetRegressor(regressor=pipe, func=np.log1p, inverse_func=expm1_nonneg,
+                                   check_inverse=False).fit(X, d.y_train)
+pickle.dump(model, open("model.pkl", "wb"), protocol=4)
+d.save(model.predict(d.test_df.drop(columns=["orbit_id"])))
+```"""
+
+RAW_NEGATIVE = SCRIPT.format(model="Ridge", kwargs="", predict="predict")
+
+
+@pytest.fixture
+def spend_csv(tmp_path):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=300)
+    # skewed non-negative target; a linear fit on the raw scale predicts negatives for some rows
+    spend = np.where(rng.random(300) < 0.3, 0.0, np.exp(1.0 + 1.5 * x + rng.normal(scale=0.3, size=300)))
+    path = tmp_path / "spend.csv"
+    pd.DataFrame({"x": x, "spend": spend}).to_csv(path, index=False)
+    return path
+
+
+def test_log_target_transform_travels_inside_the_pickle(spend_csv, tmp_path, orbit_helpers):
+    task = _task(tmp_path, spend_csv, "spend", metric="rmsle")
+    res, _ = _export(task, [LOG_TARGET])
+    _assert_exported(task, res, 200)
+    model = pickle.loads(res.model_path.read_bytes())
+    got = model.predict(pd.read_csv(res.sample_input))
+    assert (got >= 0).all() and np.allclose(got, pd.read_csv(res.sample_predictions)["prediction"])
+    assert got.max() > 5  # original scale, not log values
+
+
+def test_negative_raw_predictions_are_clipped_for_nonnegative_metrics(spend_csv, tmp_path, orbit_helpers):
+    task = _task(tmp_path, spend_csv, "spend", metric="rmsle")
+    res, _ = _export(task, [RAW_NEGATIVE])
+    _assert_exported(task, res, 200)        # d.save clips, and the verifier clips the reloaded model too
+    raw = pickle.loads(res.model_path.read_bytes()).predict(pd.read_csv(res.sample_input))
+    assert (raw < 0).any()                   # the pickled model itself still predicts negatives
+    assert (pd.read_csv(res.sample_predictions)["prediction"] >= 0).all()
+
+
+def test_export_prompt_explains_target_transforms(spend_csv, tmp_path):
+    from orbit.prompts import export_prompt
+
+    text = export_prompt(_task(tmp_path, spend_csv, "spend", metric="rmsle"), _journal().nodes[0])
+    assert "TransformedTargetRegressor" in text and "expm1_nonneg" in text
+
+
+CLIPPED_OUTSIDE = """PLAN: Clips after predict, outside the pickled object.
+```python
+import sys; sys.path.insert(0, "data")
+import numpy as np
+import pickle
+from orbit_helpers import load, Preprocessor
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import Pipeline
+d = load()
+X = d.train_df.drop(columns=[d.target])
+model = Pipeline([("prep", Preprocessor(drop=[])), ("m", Ridge())]).fit(X, d.y_train)
+pickle.dump(model, open("model.pkl", "wb"), protocol=4)
+d.save(np.clip(model.predict(d.test_df.drop(columns=["orbit_id"])), 0, 2))
+```"""
+
+CLIPPED_INSIDE = CLIPPED_OUTSIDE.replace("outside", "inside").replace(
+    'from orbit_helpers import load, Preprocessor', 'from orbit_helpers import load, Preprocessor, ClipOutput').replace(
+    'model = Pipeline([("prep", Preprocessor(drop=[])), ("m", Ridge())]).fit(X, d.y_train)',
+    'model = ClipOutput(Pipeline([("prep", Preprocessor(drop=[])), ("m", Ridge())]), lower=0, upper=2).fit(X, d.y_train)').replace(
+    "d.save(np.clip(model.predict(d.test_df.drop(columns=[\"orbit_id\"])), 0, 2))",
+    "d.save(model.predict(d.test_df.drop(columns=[\"orbit_id\"])))")
+
+
+def test_clipping_outside_the_model_is_rejected_with_a_pointed_message(spend_csv, tmp_path, orbit_helpers):
+    task = _task(tmp_path, spend_csv, "spend", metric="rmsle")
+    res, llm = _export(task, [CLIPPED_OUTSIDE, CLIPPED_INSIDE])
+    assert res.ok and res.attempts == 2
+    assert "predictions differ" in llm.prompts[1] and "ClipOutput" in llm.prompts[1]
+    assert "has " in llm.prompts[1] and "in predictions.csv" in llm.prompts[1]
+    model = pickle.loads(res.model_path.read_bytes())
+    assert model.predict(pd.read_csv(res.sample_input)).max() <= 2
+
+
+def test_clip_output_wrapper(orbit_helpers):
+    from sklearn.dummy import DummyRegressor
+    from sklearn.linear_model import LogisticRegression
+
+    wrapped = orbit_helpers.ClipOutput(DummyRegressor(strategy="constant", constant=7.0), lower=0, upper=5)
+    X = pd.DataFrame({"a": [1, 2, 3]})
+    assert wrapped.fit(X, [1, 2, 3]).predict(X).tolist() == [5.0, 5.0, 5.0]
+    from sklearn.base import clone
+    assert clone(wrapped).upper == 5
+    clf = orbit_helpers.ClipOutput(LogisticRegression(), lower=0).fit(X, [0, 1, 1])
+    assert list(clf.classes_) == [0, 1] and clf.predict_proba(X).shape == (3, 2)
+
+
+def test_export_clears_the_directories_of_an_earlier_export(clf_csv, tmp_path, orbit_helpers):
+    task = _task(tmp_path, clf_csv, "label")
+    old = task.run_dir / "export"
+    for name in ("attempt_3", "verify_3"):
+        (old / name).mkdir(parents=True)
+        (old / name / "left.txt").write_text("x")
+    res, _ = _export(task, [CLF])
+    assert res.ok and not (old / "attempt_3").exists() and not (old / "verify_3").exists()
+    assert (old / "attempt_1").is_dir()

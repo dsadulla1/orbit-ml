@@ -40,6 +40,7 @@ import pickle
 import sys
 
 sys.path.insert(0, "data")
+import numpy as np
 import pandas as pd
 
 meta = json.load(open("data/orbit_meta.json"))
@@ -52,6 +53,8 @@ if meta["needs_proba"]:
     pred = model.predict_proba(rows)[:, labels.index(str(meta["positive_label"]))]
 else:
     pred = model.predict(rows)
+    if meta.get("needs_nonneg"):
+        pred = np.clip(np.asarray(pred, dtype=float), 0, None)
 pd.DataFrame({"orbit_id": ids, "prediction": pred}).to_csv("verify.csv", index=False)
 print("verified", len(rows), "rows")
 '''
@@ -88,9 +91,15 @@ def _mismatch(task: Task, expected: pd.Series, got: pd.Series) -> str | None:
         return f"{bad} of {len(expected)} predicted labels differ" if bad else None
     a = pd.to_numeric(expected, errors="coerce").to_numpy(float)
     b = pd.to_numeric(got.loc[expected.index], errors="coerce").to_numpy(float)
-    if np.allclose(a, b, rtol=1e-5, atol=1e-6):
+    close = np.isclose(a, b, rtol=1e-5, atol=1e-6)
+    if close.all():
         return None
-    return f"predictions differ by up to {np.nanmax(np.abs(a - b)):.3g}"
+    worst = int(np.nanargmax(np.abs(a - b)))
+    return (f"{int((~close).sum())} of {len(a)} predictions differ (largest: row id "
+            f"{expected.index[worst]} has {a[worst]:.6g} in predictions.csv but {b[worst]:.6g} from the "
+            "reloaded model). Anything done to the predictions after calling the model (clipping, "
+            "inverse transforms) must be inside the pickled object instead: use "
+            "TransformedTargetRegressor for target transforms and orbit_helpers.ClipOutput for clipping")
 
 
 def _check_attempt(task: Task, sandbox: Sandbox, exec_timeout: int, export_dir: Path, k: int,
@@ -154,6 +163,8 @@ def export_best(task: Task, journal: Journal, llm, sandbox: Sandbox, exec_timeou
                       export_dir / "sample_predictions.csv", export_dir / "export.json",
                       export_dir / "registry.json"]:
             stale.unlink(missing_ok=True)
+        for stale_dir in [*export_dir.glob("attempt_*"), *export_dir.glob("verify_*")]:
+            shutil.rmtree(stale_dir, ignore_errors=True)  # leftovers of an earlier export
         input_dir = prepare_export_input(task)
         ids = pd.Index(pd.read_csv(input_dir / "test.csv")[ID_COL])
         system = prompts.system_prompt(task, exec_timeout, cpus)

@@ -357,6 +357,13 @@ def test_wrapper_label_and_regression_predictions():
     assert out.tolist() == ["b"] and out.name == "prediction"
 
 
+def test_wrapper_clips_for_nonnegative_metrics():
+    model = _Fixed([], None, [-3.0, 2.5, -0.1])
+    rows = pd.DataFrame({"x": [1, 2, 3]})
+    assert _wrapper(model, needs_proba=False, needs_nonneg=True).predict(None, rows).tolist() == [0.0, 2.5, 0.0]
+    assert _wrapper(model, needs_proba=False).predict(None, rows).tolist() == [-3.0, 2.5, -0.1]
+
+
 def test_wrapper_is_free_of_orbit_imports():
     source = Path(registry.__file__).with_name("orbit_model.py").read_text()
     assert not re.search(r"^\s*(from|import)\s+(orbit|\.)", source, re.MULTILINE)

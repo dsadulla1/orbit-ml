@@ -136,7 +136,13 @@ drop=[...])` does the text encoding and imputation inside a Pipeline (fill=False
 LightGBM / XGBoost). Identifier column(s) to drop inside the pipeline: {id_columns}. NO lambdas, no \
 classes or functions defined in the script, and no helper function defined in the script that the \
 pipeline calls: anything defined in __main__ cannot be loaded by another program. Pickle with \
-plain `pickle`, not joblib;
+plain `pickle`, not joblib. If the script transforms the target (log1p, scaling), the transform \
+belongs INSIDE the object so `predict` returns values on the original scale: wrap the regressor as \
+`TransformedTargetRegressor(regressor=<pipeline>, func=numpy.log1p, \
+inverse_func=orbit_helpers.expm1_nonneg, check_inverse=False)`; for other post-processing such as \
+clipping use `orbit_helpers.ClipOutput(model, lower=..., upper=...)` around the whole model \
+(reproduce every clip or transform the original script applied to its predictions). Never \
+post-process after calling the model: predictions.csv must be exactly the model's own output;
 3. saves it with `import pickle; pickle.dump(model, open("model.pkl", "wb"), protocol=4)`;
 4. writes predictions.csv for data/test.csv by calling that model on the raw test features \
 (`d.test_df` without {id_col!r}, same row order), with the same prediction rule as before. \

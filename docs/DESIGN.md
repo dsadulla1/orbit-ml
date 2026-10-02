@@ -140,7 +140,11 @@ The LLM rewrites the best script so that it trains on all rows and builds one sc
 `Pipeline` (or estimator) that takes raw feature rows and does its own preprocessing
 (`orbit_helpers.Preprocessor` handles text encoding and imputation), pickles it with plain
 `pickle` (protocol 4; joblib files are not supported) and writes `predictions.csv` for the check
-rows. Each attempt (up to three, later ones see the previous script and error) is accepted only if:
+rows. Anything the script did to its predictions (a target transform, clipping) must live inside
+the pickled object, which `TransformedTargetRegressor` and `orbit_helpers.ClipOutput` /
+`expm1_nonneg` provide; for metrics that reject negative values the verifier and the served model
+clip at 0. Each attempt (up to three, later ones see the previous script and the rows that
+differ) is accepted only if:
 
 1. the script exits cleanly and writes a regular `model.pkl` of at most 500 MB and valid predictions;
 2. `pickle_scan.scan` finds no disallowed global in the file. It walks the opcodes without

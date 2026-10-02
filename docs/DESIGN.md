@@ -134,10 +134,17 @@ the template produces the same structure.
 
 ## Tracking
 
-- **MLflow**: one parent run per orbit run; one nested run per experiment with params
-  (stage, parent, debug depth), metrics (val score, duration, tokens) and artifacts (script,
+- **MLflow**: one experiment per problem (`--experiment`, then `ORBIT_EXPERIMENT`, then the sanitised
+  `--name` or the first data source's name), because scores are only comparable within one problem;
+  re-running a problem adds a parent run to the same experiment. If an experiment of that name was
+  deleted earlier, the tracker restores it and retries once instead of disabling tracking. One parent run per orbit run; one nested run per experiment with
+  params (stage, parent, debug depth), metrics (val score, duration, tokens) and artifacts (script,
   prompt, response, logs). The parent run gets the per-step score curve, the best
-  validation and test scores, `journal.json` and `report.md`.
+  validation and test scores, `journal.json` and `report.md`. It is tagged `orbit.goal`,
+  `orbit.eval`, `orbit.primary_table`, `orbit.extra_tables`, `orbit.target`, `orbit.metric`,
+  `orbit.validation`, `orbit.data_fingerprint` (rows and a sha256 prefix of the primary table),
+  `orbit.version`, and carries a Markdown note (`mlflow.note.content`). `tracking.json` in the run
+  folder records the URI, experiment name and id, and run id.
 - **W&B**: one run with per-step metrics, a summary table and the scripts as artifacts.
 
 The sandbox never talks to a tracker; it has no network and no credentials.

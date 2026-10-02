@@ -87,8 +87,9 @@ labels.
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME]` | Solve a problem: run a search |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME]` | Solve a problem: run a search |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
+| `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
@@ -157,9 +158,17 @@ All settings come from environment variables (or `.env` in the working directory
 | `ORBIT_SANDBOX_TIMEOUT` | `600` | Seconds per experiment |
 | `ORBIT_SANDBOX_RUNTIME` | unset | e.g. `runsc` for gVisor |
 | `MLFLOW_TRACKING_URI` | MLflow default | e.g. `http://localhost:5000` |
+| `ORBIT_EXPERIMENT` | named after the problem | MLflow experiment / W&B project to log to (`--experiment` wins) |
 | `WANDB_API_KEY` | unset | If set, W&B becomes the default tracker (`uv sync --extra wandb`) |
 
 `--tracker auto|mlflow|wandb|none` overrides the tracker choice per run.
+
+Each problem gets its own MLflow experiment, named after `--name` or the first data source (or set
+`--experiment NAME` / `ORBIT_EXPERIMENT`), so runs inside it are comparable. Running the same
+problem again adds another run to the same experiment; each run is tagged with its goal, metric,
+validation scheme and a data fingerprint (row count and file hash) so attempts can be told apart.
+`orbit experiments` lists them. An experiment deleted in the MLflow UI is restored when its name is
+used again.
 
 If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
 HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an

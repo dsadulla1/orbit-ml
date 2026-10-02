@@ -58,6 +58,14 @@ def _std(node):
     return _r(statistics.stdev(node.fold_scores)) if len(node.fold_scores) > 1 else None
 
 
+def _validation(task) -> str:
+    col = task.spec.time_col
+    if col:
+        return (f"mean of {task.n_folds} forward-chaining folds ordered by {col}" if task.n_folds > 1
+                else f"single split ordered by {col}")
+    return f"mean of {task.n_folds}-fold cross-validation" if task.n_folds > 1 else "single validation split"
+
+
 def facts(task: Task, journal: Journal, top: int = 5) -> dict:
     metric = task.metric
     ranked = journal.ranked(metric)
@@ -70,8 +78,7 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
         "target": task.spec.target,
         "metric": task.metric_name,
         "direction": "higher is better" if metric.greater_is_better else "lower is better",
-        "validation": (f"mean of {task.n_folds}-fold cross-validation" if task.n_folds > 1
-                       else "single validation split"),
+        "validation": _validation(task),
         "baseline_val_score": _r(task.baseline),
         "baseline_is": "best constant prediction that ignores the features",
         "experiments_run": len(journal.nodes),

@@ -11,17 +11,21 @@ fold's directory is mounted, so a script never sees another fold's labels:
 
     input/fold_1/train.csv, input/fold_1/test.csv   ... input/fold_k/...
 
+With `time_col` the rows are ordered by that column instead of being shuffled: the test rows are the
+latest ones, and fold i trains on every row before its validation block (an expanding window).
+
 Each fold's test.csv holds that fold's validation rows plus all test rows. The agent cannot tell
 which unlabeled rows are validation (used to rank experiments during search) and which are test
 (scored once, for the final best experiment, from the average of the k fold predictions).
 """
 import json
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, train_test_split
 
 from .metrics import ID_COL, METRICS, Metric, score
 from .planner import describe_table, read_docs, read_table
@@ -47,6 +51,7 @@ class TaskSpec:
     docs: list[str] = field(default_factory=list)     # documentation files shown to the model
     id_column: str | None = None                      # identifies rows; not a feature
     notes: list[str] = field(default_factory=list)    # how the task was set up
+    time_col: str | None = None                       # order rows by this column; validate on later rows
 
 
 @dataclass
@@ -177,6 +182,47 @@ def _split(df: pd.DataFrame, target: str, kind: str, size: float, seed: int):
     return train_test_split(df, test_size=size, random_state=seed)
 
 
+def _order_by_time(df: pd.DataFrame, spec: TaskSpec) -> pd.DataFrame:
+    """Rows sorted by `spec.time_col` (stable, so ties keep file order). Rows without a usable time
+    are dropped. The column itself is left as it was; only a helper series is parsed."""
+    col = spec.time_col
+    if col not in df.columns:
+        raise ValueError(f"Time column {col!r} not found. Columns: {list(df.columns)}")
+    if col == spec.target:
+        raise ValueError("The time column cannot be the target.")
+    if col == ID_COL:
+        raise ValueError(f"Column name {ID_COL!r} is reserved by orbit; please rename it.")
+    raw = df[col]
+    if pd.api.types.is_numeric_dtype(raw):
+        key = pd.to_numeric(raw, errors="coerce").astype("float64")
+        key = key.where(np.isfinite(key))
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            key = pd.to_datetime(raw, errors="coerce", utc=True)
+    usable = key.notna()
+    dropped = int((~usable).sum())
+    if dropped > len(df) / 2:
+        raise ValueError(f"Time column {col!r} has no usable time value in {dropped} of {len(df)} "
+                         "rows; check that it holds dates or numbers.")
+    if key[usable].nunique() < 2:
+        raise ValueError(f"Time column {col!r} is constant, so rows cannot be ordered by it.")
+    if dropped:
+        spec.notes.append(f"dropped {dropped} rows without a usable time value")
+    order = key[usable].sort_values(kind="stable").index
+    return df.loc[order].reset_index(drop=True)
+
+
+def _time_split(df: pd.DataFrame, spec: TaskSpec):
+    """Earliest rows train, the next ones validate, the latest are the test split (df is time ordered)."""
+    n = len(df)
+    n_test, n_val = max(1, round(n * spec.test_size)), max(1, round(n * spec.val_size))
+    n_train = n - n_val - n_test
+    if n_train < 1:
+        raise ValueError(f"Too few rows ({n}) to split by time; provide more data.")
+    return df.iloc[:n_train], df.iloc[n_train:n_train + n_val], df.iloc[n_train + n_val:]
+
+
 def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     df = read_table(Path(spec.data_path))
     if spec.target not in df.columns:
@@ -184,6 +230,8 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     if ID_COL in df.columns:
         raise ValueError(f"Column name {ID_COL!r} is reserved by orbit; please rename it.")
     df = df[df[spec.target].notna()].reset_index(drop=True)
+    if spec.time_col:
+        df = _order_by_time(df, spec)
     y = df[spec.target]
     if pd.api.types.is_float_dtype(y) and (y == y.round()).all():
         # Missing values make pandas read integer targets (e.g. 0/1) as floats; restore them.
@@ -212,7 +260,7 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         raise ValueError("folds must be at least 1.")
     n_folds = spec.folds or (AUTO_FOLDS if len(df) * (1 - spec.test_size) <= AUTO_CV_MAX_ROWS else 1)
 
-    if n_folds > 1 and kind == "classification":
+    if n_folds > 1 and kind == "classification" and not spec.time_col:
         # Stratified folds need every class in every fold; the test split takes its share first.
         usable = int(int(y.astype(str).value_counts().min()) * (1 - spec.test_size))
         if usable < n_folds:
@@ -226,21 +274,33 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     features = [c for c in df.columns if c != spec.target]
 
     if n_folds == 1:
-        holdout = spec.val_size + spec.test_size
-        train, rest = _split(df, spec.target, kind, holdout, spec.seed)
-        val, test = _split(rest, spec.target, kind, spec.test_size / holdout, spec.seed)
+        if spec.time_col:
+            train, val, test = _time_split(df, spec)
+        else:
+            holdout = spec.val_size + spec.test_size
+            train, rest = _split(df, spec.target, kind, holdout, spec.seed)
+            val, test = _split(rest, spec.target, kind, spec.test_size / holdout, spec.seed)
         parts = [(train, val, test)]
         dev = train
         val_rows, test_rows = [val.assign(_fold=1)], test.assign(_fold=0)
         profile_df = train
     else:
-        dev, test = _split(df, spec.target, kind, spec.test_size, spec.seed)
-        if len(dev) < 2 * n_folds:
-            raise ValueError(f"Too few rows ({len(dev)}) for {n_folds}-fold cross-validation; "
-                             "pass --folds 1 or provide more data.")
+        if spec.time_col:
+            n_test = max(1, round(len(df) * spec.test_size))
+            dev, test = df.iloc[:len(df) - n_test], df.iloc[len(df) - n_test:]
+            if len(dev) < 2 * (n_folds + 1):
+                raise ValueError(f"Too few rows ({len(dev)}) for {n_folds} forward-chaining folds; "
+                                 "pass --folds 1 or provide more data.")
+            splits = list(TimeSeriesSplit(n_splits=n_folds).split(dev))
+        else:
+            dev, test = _split(df, spec.target, kind, spec.test_size, spec.seed)
+            if len(dev) < 2 * n_folds:
+                raise ValueError(f"Too few rows ({len(dev)}) for {n_folds}-fold cross-validation; "
+                                 "pass --folds 1 or provide more data.")
+            splits = _folds(dev, spec.target, kind, n_folds, spec.seed)
         parts = []
         val_rows, test_rows = [], test.assign(_fold=0)
-        for k, (tr_idx, va_idx) in enumerate(_folds(dev, spec.target, kind, n_folds, spec.seed), 1):
+        for k, (tr_idx, va_idx) in enumerate(splits, 1):
             parts.append((dev.iloc[tr_idx], dev.iloc[va_idx], test))
             val_rows.append(dev.iloc[va_idx].assign(_fold=k))
         profile_df = dev

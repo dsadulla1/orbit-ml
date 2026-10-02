@@ -123,6 +123,11 @@ def data_section(task) -> str:
                    f"train/test split of the same data (data/train.csv and data/test.csv change "
                    f"between runs); the score is the mean over the runs. Do not hard-code row "
                    f"counts or ids.")
+    if task.spec.time_col:
+        scoring = (scoring + " " if scoring else "") + (
+            f"Validation and test rows are later in time (column {task.spec.time_col!r}) than the "
+            f"training rows of the same run, so features must not rely on information from after a "
+            f"row's own time.")
     extras = ""
     if task.spec.id_column:
         extras += (f"\n\nColumn {task.spec.id_column!r} only identifies rows; do not use it as a "

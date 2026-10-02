@@ -175,3 +175,185 @@ def test_baseline_is_the_best_constant_for_each_metric():
     assert _baseline(METRICS["rmsle"], train, val, None) < raw_mean - 0.5
     assert _baseline(METRICS["mae"], train, val, None) <= score(
         METRICS["mae"], val, pd.Series(train.mean(), index=val.index))
+
+
+# ---- time-aware validation ---------------------------------------------------------------
+
+def _time_csv(tmp_path, n=300, kind="date", shuffle=True, name="ts.csv"):
+    df = pd.DataFrame({"f0": range(n), "f1": [i % 7 for i in range(n)],
+                       "label": [("yes" if i % 3 == 0 else "no") for i in range(n)]})
+    if kind == "date":
+        df["when"] = (pd.Timestamp("2020-01-01") + pd.to_timedelta(range(n), unit="D")).strftime("%Y-%m-%d")
+    else:
+        df["when"] = [1990 + i for i in range(n)]
+    if shuffle:
+        df = df.sample(frac=1.0, random_state=1).reset_index(drop=True)
+    path = tmp_path / name
+    df.to_csv(path, index=False)
+    return path
+
+
+def _key(series, kind):
+    return pd.to_datetime(series) if kind == "date" else series
+
+
+def _fold_frames(task):
+    labels = pd.read_csv(task.run_dir / "hidden" / "labels.csv")
+    for k in range(1, task.n_folds + 1):
+        d = task.fold_dir(k)
+        train, test = pd.read_csv(d / "train.csv"), pd.read_csv(d / "test.csv")
+        val_ids = labels[(labels["split"] == "val") & (labels["fold"] == (k if task.n_folds > 1 else 1))]["orbit_id"]
+        test_ids = labels[labels["split"] == "test"]["orbit_id"]
+        yield train, test[test["orbit_id"].isin(val_ids)], test[test["orbit_id"].isin(test_ids)], test
+
+
+@pytest.mark.parametrize("kind", ["date", "number"])
+@pytest.mark.parametrize("folds", [1, 3])
+def test_time_split_never_trains_on_the_future(tmp_path, kind, folds):
+    path = _time_csv(tmp_path, kind=kind)
+    task = prepare(TaskSpec(str(path), "label", folds=folds, time_col="when"), tmp_path / "run")
+    assert task.n_folds == folds
+    all_dev_max, test_min, seen_val = None, None, []
+    for train, val, test, both in _fold_frames(task):
+        assert len(val) > 0 and len(test) > 0 and len(both) == len(val) + len(test)
+        assert _key(train["when"], kind).max() <= _key(val["when"], kind).min()
+        assert "label" not in both.columns
+        seen_val.append(val)
+        test_min = _key(test["when"], kind).min()
+        # every test row is at least as late as every development row
+        assert test_min >= _key(train["when"], kind).max()
+        assert test_min >= _key(val["when"], kind).max()
+    # test rows never appear in a train.csv (rows are identified by their unique f0)
+    test_f0 = set(test["f0"])
+    for k in range(1, folds + 1):
+        assert not test_f0 & set(pd.read_csv(task.fold_dir(k) / "train.csv")["f0"])
+    n = 300
+    assert len(test) == round(n * 0.2)
+
+
+def test_time_cv_is_an_expanding_window(tmp_path):
+    path = _time_csv(tmp_path, n=300)
+    task = prepare(TaskSpec(str(path), "label", folds=3, time_col="when"), tmp_path / "run")
+    frames = list(_fold_frames(task))
+    trains = [set(t["f0"]) for t, _, _, _ in frames]
+    vals = [set(v["f0"]) for _, v, _, _ in frames]
+    assert trains[0] < trains[1] < trains[2]               # each fold trains on more rows
+    assert all(not t & v for t, v in zip(trains, vals))
+    assert trains[1] == trains[0] | vals[0] and trains[2] == trains[1] | vals[1]
+    assert not vals[0] & vals[1] and not vals[1] & vals[2]
+    dev = len(trains[2]) + len(vals[2])
+    assert dev == 240 and len(trains[0]) >= len(vals[0])  # first block is only ever training data
+
+
+def test_time_labels_schema_and_original_values_unchanged(tmp_path):
+    path = _time_csv(tmp_path)
+    plain = prepare(TaskSpec(str(path), "label", folds=3), tmp_path / "plain")
+    task = prepare(TaskSpec(str(path), "label", folds=3, time_col="when"), tmp_path / "run")
+    cols = lambda t: list(pd.read_csv(t.run_dir / "hidden" / "labels.csv").columns)
+    assert cols(task) == cols(plain) == ["orbit_id", "split", "fold", "target"]
+    labels = pd.read_csv(task.run_dir / "hidden" / "labels.csv")
+    assert set(labels.loc[labels["split"] == "test", "fold"]) == {0}
+    assert set(labels.loc[labels["split"] == "val", "fold"]) == {1, 2, 3}
+    original = pd.read_csv(path).set_index("f0")["when"]
+    for train, _, _, both in _fold_frames(task):
+        for frame in (train, both):
+            assert (frame.set_index("f0")["when"] == original.loc[frame["f0"]].values).all()
+    assert list(pd.read_csv(task.fold_dir(1) / "train.csv").columns) == list(pd.read_csv(path).columns)
+    assert Task.load(task.run_dir).spec.time_col == "when"
+
+
+def test_time_ties_keep_file_order(tmp_path):
+    n = 200
+    df = pd.DataFrame({"f0": range(n), "when": [i // 20 for i in range(n)],
+                       "label": [("yes" if i % 3 == 0 else "no") for i in range(n)]})
+    path = tmp_path / "ties.csv"
+    df.to_csv(path, index=False)
+    task = prepare(TaskSpec(str(path), "label", folds=1, time_col="when"), tmp_path / "run")
+    train = pd.read_csv(task.input_dir / "train.csv")
+    assert train["f0"].tolist() == list(range(len(train)))   # stable: ties stay in file order
+    (_, val, test, _), = _fold_frames(task)
+    assert train["when"].max() <= val["when"].min() <= val["when"].max() <= test["when"].min()
+
+
+def test_time_unparseable_rows_are_dropped_and_noted(tmp_path):
+    path = _time_csv(tmp_path, n=100)
+    df = pd.read_csv(path)
+    df.loc[[3, 10, 50], "when"] = ["not a date", None, "??"]
+    df.to_csv(path, index=False)
+    spec = TaskSpec(str(path), "label", folds=1, time_col="when")
+    task = prepare(spec, tmp_path / "run")
+    assert "dropped 3 rows without a usable time value" in task.spec.notes
+    assert task.n_train + len(pd.read_csv(task.input_dir / "test.csv")) == 97
+
+
+@pytest.mark.parametrize("edit,msg", [
+    (lambda df: df.drop(columns="when"), "not found"),
+    (lambda df: df.assign(when="2020-01-01"), "constant"),
+    (lambda df: df.assign(when=["x"] * 60 + df["when"].tolist()[60:]), "no usable time value"),
+])
+def test_time_column_errors(tmp_path, edit, msg):
+    path = _time_csv(tmp_path, n=100)
+    edit(pd.read_csv(path)).to_csv(path, index=False)
+    with pytest.raises(ValueError, match=msg):
+        prepare(TaskSpec(str(path), "label", folds=1, time_col="when"), tmp_path / "run")
+
+
+def test_time_column_cannot_be_target_or_reserved_id(tmp_path):
+    path = _time_csv(tmp_path, n=100)
+    with pytest.raises(ValueError, match="cannot be the target"):
+        prepare(TaskSpec(str(path), "label", folds=1, time_col="label"), tmp_path / "run")
+    df = pd.read_csv(path)
+    df["orbit_id"] = range(len(df))
+    df.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="reserved"):
+        prepare(TaskSpec(str(path), "label", folds=1, time_col="orbit_id"), tmp_path / "run2")
+
+
+def test_time_cv_needs_enough_rows(tmp_path):
+    path = _time_csv(tmp_path, n=12)
+    with pytest.raises(ValueError, match="Too few rows"):
+        prepare(TaskSpec(str(path), "label", folds=5, time_col="when"), tmp_path / "run")
+
+
+def test_time_cv_does_not_reduce_folds_for_rare_classes(tmp_path):
+    n = 200
+    df = pd.DataFrame({"f0": range(n), "when": range(n), "label": ["no"] * n})
+    df.loc[[5, 60, 100, 150, 190], "label"] = "yes"
+    path = tmp_path / "rare.csv"
+    df.to_csv(path, index=False)
+    spec = TaskSpec(str(path), "label", folds=4, time_col="when", metric="accuracy")
+    task = prepare(spec, tmp_path / "run")
+    assert task.n_folds == 4 and not any("folds reduced" in n for n in task.spec.notes)
+
+
+def test_time_cv_requires_both_classes_in_every_validation_fold(tmp_path):
+    n = 200
+    df = pd.DataFrame({"f0": range(n), "when": range(n), "label": ["no"] * n})
+    df.loc[[5, 190], "label"] = "yes"   # no positives in the middle blocks
+    path = tmp_path / "rare.csv"
+    df.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="both classes"):
+        prepare(TaskSpec(str(path), "label", folds=4, time_col="when"), tmp_path / "run")
+
+
+def test_older_task_json_without_time_col_loads(clf_csv, tmp_path):
+    import json
+    task = prepare(TaskSpec(str(clf_csv), "label", folds=1), tmp_path / "run")
+    d = json.loads((task.run_dir / "task.json").read_text())
+    del d["spec"]["time_col"]
+    (task.run_dir / "task.json").write_text(json.dumps(d))
+    assert Task.load(task.run_dir).spec.time_col is None
+
+
+@pytest.mark.parametrize("folds", [1, 3])
+def test_time_column_is_mentioned_in_prompt_and_report(tmp_path, folds):
+    from orbit import prompts, report
+    from orbit.agent import Journal
+    path = _time_csv(tmp_path)
+    task = prepare(TaskSpec(str(path), "label", folds=folds, time_col="when"), tmp_path / "run")
+    assert "later in time (column 'when')" in prompts.data_section(task)
+    text = report.facts(task, Journal())["validation"]
+    assert text == (f"mean of {folds} forward-chaining folds ordered by when" if folds > 1
+                    else "single split ordered by when")
+    plain = prepare(TaskSpec(str(path), "label", folds=folds), tmp_path / "plain")
+    assert "later in time" not in prompts.data_section(plain)

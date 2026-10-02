@@ -81,7 +81,7 @@ runs/20261001-120000-breast_cancer/
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--name NAME]` | Solve a problem: run a search |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME]` | Solve a problem: run a search |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
@@ -103,6 +103,14 @@ column is ignored, because the generated code could read the labels from it (com
 into the training table first), and so is a table that only repeats the training columns without
 the target. Folders named `runs`, `hidden` or `mlruns` and earlier orbit runs are never copied. Everything you point at is copied into the run folder.
 URLs are fetched with the host's network access, so only use sources you trust.
+
+Validation: by default rows are split at random. For forecasting-style problems pass
+`--time-col COL`: rows are ordered by that column (dates or numbers; rows without a usable value are
+dropped and noted), the latest rows become the test split, and validation rows are always later than
+the rows used for training (one split, or forward-chaining folds that train on everything before each
+validation block). The column stays available to the generated code as a feature. `--patience N`
+ends the search early once N working experiments in a row fail to beat the last clear improvement by
+more than its spread across folds (with a single split, by any margin).
 
 Metrics: `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`, `f1_macro`, `rmse`,
 `rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`.

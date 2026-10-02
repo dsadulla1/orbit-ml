@@ -40,6 +40,16 @@ Datasets of up to about 10,000 development rows use 5-fold cross-validation (`--
 change it); larger ones use a single 60/20/20 train / validation / test split (`--folds 1`),
 laid out as `input/train.csv` and `input/test.csv`.
 
+With `--time-col COL` the rows are stably sorted by that column (parsed as dates, or used as
+numbers) and nothing is shuffled: the latest `test_size` share is the test split. A single split
+trains on the earliest rows and validates on the next ones. With k folds the development rows are
+cut into k + 1 contiguous blocks; fold i trains on all blocks before block i + 1 and validates on
+it (an expanding window, via `TimeSeriesSplit`), so the first block is only ever training data.
+Each fold's `test.csv` still holds its validation rows plus all test rows, and `labels.csv` keeps
+its columns. Rows without a usable time value are dropped (noted in `spec.notes`), the original
+column values are written unchanged, and the stratified fold reduction for rare classes is not
+applied. The prompt tells the model that validation and test rows are later than the training rows.
+
 Only one fold's directory is mounted into a sandbox, read-only, so a script never sees another
 fold's labels; `hidden/` is never mounted. A script is run once per fold and must predict every
 row in that fold's `test.csv`. The orchestrator scores each fold's validation rows and ranks
@@ -61,7 +71,10 @@ Each step chooses one action:
   `explore_prob`, to one of the next two.
 
 Every prompt carries a compact history (`#id [stage] score :: plan`) so the model avoids
-repeating ideas. The search stops at the step, time or token budget, after three consecutive
+repeating ideas. The search stops at the step, time or token budget, optionally when it stalls
+(`--patience N`: N working experiments in a row, failed ones not counted, that do not beat the last
+clear improvement by more than that experiment's fold spread, the sample standard deviation of its
+fold scores, or 0 for a single split; several small gains therefore add up), after three consecutive
 LLM/infrastructure errors, or on Ctrl-C. The best result so far is always scored and reported.
 
 ## Response protocol

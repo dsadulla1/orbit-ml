@@ -102,6 +102,12 @@ def run(
     drafts: int = typer.Option(3, help="Independent initial solutions before refining"),
     folds: int = typer.Option(None, help="Cross-validation folds (default: 5 for small data, "
                                           "otherwise 1 = a single validation split)"),
+    time_col: str = typer.Option(None, "--time-col",
+                                 help="Order rows by this column and validate on later rows than "
+                                      "the ones used for training"),
+    patience: int = typer.Option(None, min=1,
+                                 help="Stop after this many working experiments in a row that do "
+                                      "not beat the best by more than its spread across folds"),
     timeout: int = typer.Option(None, help="Per-experiment time limit in seconds"),
     tracker: str = typer.Option("auto", help="auto | mlflow | wandb | none"),
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
@@ -135,17 +141,20 @@ def run(
     run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
     try:
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
-                          seed=seed, llm=llm, within=out)
+                          seed=seed, llm=llm, within=out, time_col=time_col)
     except (SourceError, PlanError, ValueError) as e:
         console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)
     cfg = SearchConfig(max_steps=steps, time_budget=minutes * 60, token_budget=tokens,
                        n_drafts=drafts, exec_timeout=timeout or sb_settings.timeout,
-                       cpus=sb_settings.cpus, seed=seed)
+                       cpus=sb_settings.cpus, seed=seed, patience=patience)
     trk = make_tracker(tracker_choice(tracker))
     trk.start(task, cfg, llm.model)
 
     scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
+    if task.spec.time_col:
+        scheme = (f"{task.n_folds} forward-chaining folds" if task.n_folds > 1 else "single split") \
+                 + f" ordered by {escape(task.spec.time_col)}"
     console.print(f"[bold]orbit[/] {escape(str(run_dir))}  model={escape(llm.model)}  tracker={trk.name}")
     console.print(f"  data: {escape(Path(task.spec.data_path).name)}, target={escape(task.spec.target)}, "
                   f"metric={task.metric_name}, baseline={task.baseline:.4f}, validation={scheme}")

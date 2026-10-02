@@ -15,6 +15,7 @@
 | `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry |
 | `problem.py` | Resolve sources, plan, and prepare the task in one call |
 | `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
+| `helpers.py` | Optional helper for generated scripts, copied into every sandbox input directory as `orbit_helpers.py` (numpy and pandas only): consistent text encoding, NaN-filled frames, validated `predictions.csv` |
 | `prompts.py` | System prompt (sandbox contract), draft/improve/debug templates, response parsing |
 | `llm.py` | Chat-completions client for any OpenAI-compatible endpoint |
 | `sandbox.py` | One locked-down `docker run` per experiment |
@@ -36,6 +37,10 @@ data.csv ──split──► test (20%)  ────────────�
                                      hidden/labels.csv (orbit_id, split, fold, target)
 ```
 
+Next to every `train.csv` / `test.csv` pair orbit also writes `orbit_meta.json` (target, task kind,
+metric, positive label, class names, id and time columns, fold count, extra table names) and
+`orbit_helpers.py` (a copy of `helpers.py`); `extra/` holds additional tables when there are any.
+
 Datasets of up to about 10,000 development rows use 5-fold cross-validation (`--folds N` to
 change it); larger ones use a single 60/20/20 train / validation / test split (`--folds 1`),
 laid out as `input/train.csv` and `input/test.csv`.
@@ -49,6 +54,14 @@ Each fold's `test.csv` still holds its validation rows plus all test rows, and `
 its columns. Rows without a usable time value are dropped (noted in `spec.notes`), the original
 column values are written unchanged, and the stratified fold reduction for rare classes is not
 applied. The prompt tells the model that validation and test rows are later than the training rows.
+
+The helper module is a convenience for the model, not a gate: scripts may ignore it and read the
+CSVs directly. It contains no labels (the meta file lists class names only, never rows or paths).
+`load()` builds numeric feature frames with one text-category mapping shared by the train and test
+features (so a category seen only in the test rows cannot crash a script), and `Data.save` checks
+the predictions against the metric (length, finiteness, probability range, class names; it clips
+negatives for non-negative metrics) before writing `predictions.csv`. Scoring is unchanged and
+still validates the file on the orchestrator side.
 
 Only one fold's directory is mounted into a sandbox, read-only, so a script never sees another
 fold's labels; `hidden/` is never mounted. A script is run once per fold and must predict every

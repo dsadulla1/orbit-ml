@@ -71,10 +71,16 @@ runs/20261001-120000-breast_cancer/
   report.html        the same as one standalone page: charts, leaderboard, best script (open in a browser)
   journal.json       every experiment: stage, parent, plan, score, error, tokens
   task.json          metric, baseline, data profile
-  input/             train.csv + unlabeled test.csv, or fold_1/ ... fold_k/ with cross-validation
+  input/             train.csv + unlabeled test.csv (+ orbit_meta.json, orbit_helpers.py), or fold_1/ ... fold_k/
   hidden/labels.csv  validation/test labels (never mounted)
   nodes/007/         solution.py, prompt.md, response.md, stdout.txt, stderr.txt, predictions.csv
 ```
+
+Generated scripts can use a small bundled helper (`data/orbit_helpers.py`, numpy and pandas only):
+`d = load()` gives numeric feature frames with text columns encoded consistently for train and
+test (plus NaN-filled copies), and `d.save(pred)` validates and writes `predictions.csv`. The raw
+CSVs and any extra tables stay available for custom feature engineering, and the helper holds no
+labels.
 
 ## Commands
 

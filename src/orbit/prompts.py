@@ -18,10 +18,11 @@ Sandbox rules:
 - Available libraries: {libraries}. Nothing else; no pip installs, no internet access.
 - The libraries are recent releases; use their current APIs:
   * LightGBM: `import lightgbm as lgb`. lgb.train() and fit() do not accept early_stopping_rounds, \
-verbose or verbose_eval; use callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)] and put \
-verbose=-1 in the params or constructor.
-  * Early stopping needs a held-out validation set (valid_sets / eval_set); otherwise skip it. \
-XGBoost takes early_stopping_rounds in the estimator's constructor, not in fit().
+verbose or verbose_eval; put verbose=-1 in the params or constructor.
+  * Prefer a fixed number of boosting rounds (for example 200 to 500 with a small learning rate) over \
+early stopping, which is a frequent source of crashes. If you use it anyway, carve a validation set out \
+of the training rows and pass it explicitly (valid_sets / eval_set) with callbacks=[lgb.early_stopping(50)] \
+for LightGBM; XGBoost takes early_stopping_rounds in the estimator's constructor, not in fit().
   * RMSE: sklearn.metrics.root_mean_squared_error (mean_squared_error has no squared= argument).
   * Format numbers with f-strings like f"{{score:.4f}}"; never mix f-strings with .format().
 - Text columns (marked TEXT in the profile) must be encoded before use with scikit-learn, XGBoost or \

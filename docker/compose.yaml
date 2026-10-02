@@ -46,6 +46,15 @@ services:
     image: orbit-sandbox:latest
     profiles: ["build"]
 
+  # Build-only, on top of orbit-sandbox (build that first): `orbit serve` starts this image
+  # itself with `docker run`. It serves registered models with `mlflow models serve`.
+  serve:
+    build:
+      context: .
+      dockerfile: serve.Dockerfile
+    image: orbit-serve:latest
+    profiles: ["build"]
+
   # Local OpenAI-compatible LLM server (optional). Sized for 2-3 x 12 GB Ampere GPUs.
   # The endpoint is unauthenticated, so it is published on 127.0.0.1 only.
   vllm:

@@ -21,6 +21,25 @@ filesystem, all capabilities dropped and CPU/memory/PID limits; see
 `src/orbit/sandbox.py`. The libraries in `sandbox-requirements.txt` must match
 `LIBRARIES` in `src/orbit/prompts.py`. Rebuild after changing either.
 
+## Serving image
+
+```bash
+docker compose --env-file .env -f docker/compose.yaml build serve
+```
+
+This produces `orbit-serve:latest` (override with `ORBIT_SERVE_IMAGE`). It starts from
+`orbit-sandbox:latest`, so build the sandbox image first, and adds MLflow (`MLFLOW_VERSION`
+build argument, default the version of the MLflow server image in `compose.yaml`) without moving
+any of the sandbox's pinned libraries. `orbit serve` starts it with `docker run`, one container
+per served model, running `mlflow models serve`; see the README's "Serving a model".
+
+Serving is a separate image because it has different needs from the sandbox: it must reach the
+tracking server and write to a temporary directory, while the sandbox has no network and a
+read-only root filesystem. The sandbox runs generated code; the serving image is only used for
+models that already passed export verification. Its containers publish on 127.0.0.1 only
+(the scoring server has no authentication), mount none of MLflow's data, and drop all
+capabilities, with a memory limit (`ORBIT_SERVE_MEMORY`, default 4g) and a PID limit.
+
 ## MLflow
 
 ```bash

@@ -2,7 +2,6 @@
 import time
 from pathlib import Path
 
-import pandas as pd
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
@@ -12,6 +11,7 @@ from rich.table import Table
 from . import report as report_mod
 from .agent import Agent, Journal, SearchConfig
 from .config import LLMSettings, SandboxSettings, load_dotenv, tracker_choice
+from .planner import PROFILE_ROWS
 from .task import Task, TaskSpec, prepare, profile
 
 app = typer.Typer(help="Autonomous ML experiments: an LLM proposes, a sandbox runs, orbit scores.",
@@ -36,20 +36,58 @@ def _llm():
 
 
 @app.command()
-def explore(data: Path = typer.Argument(..., exists=True, help="CSV file"),
-            target: str = typer.Option(..., "--target", "-t")):
-    """Print the dataset profile the agent will see."""
-    df = pd.read_csv(data)
-    if target not in df.columns:
-        raise typer.BadParameter(f"{target!r} not found. Columns: {list(df.columns)}",
-                                 param_hint="--target")
-    console.print(escape(profile(df, target)))
+def explore(
+    data: list[str] = typer.Argument(..., help="Data: CSV/TSV/Excel files, folders, zip files or "
+                                               "http(s) URLs, as for `orbit run`"),
+    target: str = typer.Option(None, "--target", "-t", help="Column to profile as the target"),
+    goal: str = typer.Option(None, help="Accepted for symmetry with `run`; explore makes no LLM call"),
+):
+    """Show the tables and documents found in the sources and the data profile the agent sees.
+
+    Examples:
+      orbit explore data.csv -t churn
+      orbit explore examples/house_prices/
+      orbit explore "Online Retail.xlsx"
+    """
+    import tempfile
+
+    from .planner import describe_table, read_table
+    from .sources import SourceError, resolve
+
+    with tempfile.TemporaryDirectory(prefix="orbit-explore-") as tmp:
+        try:
+            found = resolve(data, Path(tmp) / "source")
+            frames = {p: read_table(p, nrows=PROFILE_ROWS) for p in found.tables}
+        except (SourceError, ValueError, OSError) as e:
+            console.print(f"[red]Could not read the data:[/] {escape(str(e))}")
+            raise typer.Exit(1)
+        console.print(f"Tables: {escape(', '.join(p.name for p in found.tables))}")
+        if found.docs:
+            console.print(f"Documents: {escape(', '.join(p.name for p in found.docs))}")
+        for note in found.notes:
+            console.print(f"[dim]{escape(note)}[/]")
+        if target:
+            holders = [p for p, df in frames.items() if target in df.columns]
+            if not holders:
+                console.print(f"[red]--target {escape(repr(target))} not found.[/] Columns:")
+                for p, df in frames.items():
+                    console.print(f"  {escape(p.name)}: {escape(', '.join(map(str, df.columns)))}")
+                raise typer.Exit(1)
+            primary = holders[0]
+        for p, df in frames.items():
+            console.print()
+            if target and p == primary:
+                console.print(escape(f"### {p.name}"))
+                console.print(escape(profile(df, target)))
+            else:
+                console.print(escape(describe_table(p, df)))
 
 
 @app.command()
 def run(
-    data: list[str] = typer.Argument(..., help="Data: CSV/TSV files, folders, zip files or http(s) "
-                                               "URLs. Text files (data descriptions) are read too."),
+    data: list[str] = typer.Argument(..., help="Data: CSV/TSV/Excel (.xlsx) files, folders, zip files "
+                                               "or http(s) URLs. Text files (data descriptions) are "
+                                               "read too."),
     target: str = typer.Option(None, "--target", "-t",
                                help="Column to predict (default: inferred from --goal and the data)"),
     goal: str = typer.Option(None, help="The problem in plain language, e.g. 'predict each house's price'"),
@@ -67,6 +105,8 @@ def run(
     timeout: int = typer.Option(None, help="Per-experiment time limit in seconds"),
     tracker: str = typer.Option("auto", help="auto | mlflow | wandb | none"),
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
+    name: str = typer.Option(None, help="Name for the run folder: <timestamp>-<name> "
+                                        "(default: taken from the first data source)"),
     seed: int = typer.Option(42),
 ):
     """Solve a prediction problem: orbit builds and compares models, then reports.
@@ -77,7 +117,7 @@ def run(
       orbit run https://example.com/train.csv --goal "Predict survival"
     """
     from .planner import PlanError
-    from .problem import run_name, setup_task
+    from .problem import run_name, sanitize_name, setup_task
     from .sandbox import DockerSandbox, check_docker
     from .sources import SourceError
     from .tracking import make_tracker
@@ -91,10 +131,11 @@ def run(
         raise typer.Exit(1)
     llm = _llm()
 
-    run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{run_name(data)}"
+    stem = (sanitize_name(name) if name else "") or run_name(data)
+    run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
     try:
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
-                          seed=seed, llm=llm)
+                          seed=seed, llm=llm, within=out)
     except (SourceError, PlanError, ValueError) as e:
         console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)

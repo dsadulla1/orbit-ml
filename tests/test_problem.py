@@ -71,3 +71,45 @@ def test_run_command_reports_setup_errors(tmp_path, monkeypatch):
     monkeypatch.setattr("orbit.cli._llm", lambda: ScriptedLLM([]))
     r = CliRunner().invoke(app, ["run", str(tmp_path / "missing.csv"), "--out", str(tmp_path / "runs")])
     assert r.exit_code == 1 and "Could not set up the task" in r.output and "does not exist" in r.output
+
+
+def test_sanitize_name():
+    from orbit.problem import sanitize_name
+
+    assert sanitize_name("My run: v2!") == "My_run_v2"
+    assert sanitize_name("x" * 60) == "x" * 40 and sanitize_name("***") == ""
+
+
+def test_failed_setup_leaves_no_run_folder(tmp_path):
+    runs = tmp_path / "runs"
+    run_dir = runs / "r1"
+    with pytest.raises(PlanError, match="no --target"):
+        setup_task([str(_house(tmp_path) / "train.csv")], run_dir, within=runs)
+    assert not run_dir.exists()
+    keep = runs / "r2"
+    (keep / "source").mkdir(parents=True)
+    (keep / "mine.txt").write_text("keep")
+    with pytest.raises(SourceError):
+        setup_task([str(tmp_path / "nope.csv")], keep, within=runs)
+    assert (keep / "mine.txt").read_text() == "keep"
+    # a folder outside `within` is never removed
+    other = tmp_path / "other" / "r3"
+    with pytest.raises(SourceError):
+        setup_task([str(tmp_path / "nope.csv")], other, within=runs)
+    assert other.exists()
+
+
+def test_run_command_names_folder_and_cleans_up(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr("orbit.sandbox.check_docker", lambda s=None: (True, "ok"))
+    monkeypatch.setattr("orbit.cli._llm", lambda: ScriptedLLM([]))
+    seen = []
+
+    def fake_setup(sources, run_dir, **kw):
+        seen.append(run_dir.name)
+        raise SourceError("boom")
+
+    monkeypatch.setattr("orbit.problem.setup_task", fake_setup)
+    r = CliRunner().invoke(app, ["run", "data.csv", "--out", str(tmp_path), "--name", "my run!"])
+    assert r.exit_code == 1 and seen[0].endswith("-my_run")

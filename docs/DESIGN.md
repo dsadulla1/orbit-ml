@@ -23,11 +23,13 @@
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
 | `export.py` | Refit the best experiment on all labeled rows, save one pickled model, verify it by reloading it in the sandbox |
 | `pickle_scan.py` | Allow-list scan of a pickle stream (no unpickling) run before an exported model is loaded |
+| `orbit_model.py` | The MLflow pyfunc wrapper shipped inside every registered model (imports nothing from orbit) |
+| `registry.py` | Log the exported model to MLflow, register a version, set tags, description and the `champion` alias |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
 | `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
 | `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
 | `html_report.py` | Standalone `report.html` (Jinja, inline SVG charts, no scripts or external assets) |
-| `cli.py` | `explore` (same sources as `run`), `run`, `results`, `compare`, `summarize`, `doctor` |
+| `cli.py` | `explore` (same sources as `run`), `run`, `export`, `models`, `results`, `compare`, `experiments`, `summarize`, `doctor` |
 
 ## Data flow and label hiding
 
@@ -155,6 +157,11 @@ The accepted model is copied to `export/model.pkl` next to `sample_input.csv`,
 `sample_predictions.csv` and `export.json` (outcome and attempt notes, no code or data). Export
 problems never raise: the result carries `ok=False` and a reason.
 
+`orbit run` (MLflow tracker, unless `--no-export`) and `orbit export RUN_DIR` call `export_best`
+and then `registry.register_model`; a failed export is a warning, the run's results stay intact.
+`export/registry.json` records the outcome and `results.collect` adds it, with `export.json`, as
+the `model` entry shown by `orbit results` and the HTML report.
+
 ## Reports and number verification
 
 `report.facts()` derives everything worth saying from the journal: the best experiment, its
@@ -200,6 +207,27 @@ the template produces the same structure.
   experiment's run as `peak_mem_mb` and `cpu_pct_mean`, kept in `journal.json`, and shown in the
   HTML report. Both are `None` when no sample was taken.
 - **W&B**: one run with per-step metrics, a summary table and the scripts as artifacts.
+
+- **Model registry** (MLflow): `registry.register_model` resumes the search's parent run (the one in
+  `tracking.json`) and logs `export/model.pkl` as a pyfunc model "from code": `orbit_model.py`
+  (`OrbitModel`) with the pickle and `orbit_meta.json` as artifacts and `orbit_helpers.py` as code,
+  so the file runs where orbit is not installed. `load_context` unpickles with plain `pickle`; that
+  is acceptable because the file passed the allow-list scan and the sandbox reload check at export
+  time and is only loaded inside the serving container. `predict` ignores the target, id column and
+  `orbit_id` if present and returns a Series named `prediction`. Logging itself never unpickles the
+  model, since the host may lack its libraries and generated pickles are not loaded outside a
+  container. `pip_requirements` are the sandbox's pins (`registry.PINNED`, tested against
+  `docker/sandbox-requirements.txt`, with `xgboost-cpu` as `xgboost`) plus the installed MLflow.
+  The signature lists the sample's columns as required but untyped: MLflow's inferred types reject
+  a null in an integer column and truncate 1.5 in one to 1, while the pipeline handles both.
+  The registered model is named by `--model-name`, else the experiment. Each version is tagged
+  `orbit.run_id`, `orbit.experiment`, `orbit.metric`, `orbit.val_score`, `orbit.val_std`,
+  `orbit.test_score`, `orbit.baseline`, `orbit.goal`, `orbit.validation`,
+  `orbit.data_fingerprint` and has a Markdown description. The alias `champion` moves to the new
+  version when absent, forced, when the champion's metric or data fingerprint differs (not
+  comparable), or when the new validation score is at least as good (direction from
+  `metrics.METRICS`); otherwise it stays. `register_model` never raises for MLflow problems; it
+  returns `version=None` and a message.
 
 The sandbox never talks to a tracker; it has no network and no credentials.
 

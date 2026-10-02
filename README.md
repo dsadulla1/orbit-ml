@@ -91,8 +91,10 @@ labels.
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME]` | Solve a problem: run a search |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
+| `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry (needs the LLM and Docker; `orbit run` does this itself unless `--no-export`) |
+| `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
 | `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
@@ -193,6 +195,26 @@ can see which experiment was heavy or close to its memory limit. The HTML report
 per experiment. Set `ORBIT_SYSTEM_METRICS=off` to skip the system metrics; the sampling interval
 follows `MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL`. Short experiments may finish before the first
 sample, in which case the values are left empty.
+
+### Model registry
+
+After a search with MLflow, `orbit run` exports the best experiment (see [Model export](docs/DESIGN.md#model-export))
+and registers it as a new version of an MLflow model named after the experiment (`orbit export
+RUN_DIR --model-name NAME` does the same for an existing run). The version is logged on the run's
+parent run as a pyfunc model that takes raw feature rows and returns the predicted probability (for
+probability metrics) or value, with the pickled model, the helper module, an input example, a
+signature that only names the input columns, and the sandbox's pinned library versions as its
+requirements; it needs those versions to load. Version tags record the run, experiment, metric,
+validation and test scores, baseline, goal, validation scheme and data fingerprint.
+
+The alias `champion` marks the version to serve. It moves to a new version when there is no
+champion yet, when the new validation score is at least as good as the champion's, or when the two
+cannot be compared (a different metric or data fingerprint); `--force-champion` always moves it.
+Otherwise it stays, and the output says so. The model is refit on every labeled row, so the honest
+performance estimate is the search's cross-validation score and held-out test score, which are
+stored with the version, and not the refit's own predictions. `--no-export` skips this step; export
+and registration problems print a warning and never change a run's results. Only MLflow runs
+register models; W&B and `none` skip it.
 
 If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
 HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an

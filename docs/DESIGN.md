@@ -25,11 +25,12 @@
 | `pickle_scan.py` | Allow-list scan of a pickle stream (no unpickling) run before an exported model is loaded |
 | `orbit_model.py` | The MLflow pyfunc wrapper shipped inside every registered model (imports nothing from orbit) |
 | `registry.py` | Log the exported model to MLflow, register a version, set tags, description and the `champion` alias |
+| `serve.py` | Command builders and parsers behind `orbit serve` and `orbit predict`: model URIs, the serving container's `docker run`, Compose network discovery, readiness polling, listing and stopping, the CSV scoring client |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
 | `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
 | `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
 | `html_report.py` | Standalone `report.html` (Jinja, inline SVG charts, no scripts or external assets) |
-| `cli.py` | `explore` (same sources as `run`), `run`, `export`, `models`, `results`, `compare`, `experiments`, `summarize`, `doctor` |
+| `cli.py` | `explore` (same sources as `run`), `run`, `export`, `models`, `serve`, `predict`, `results`, `compare`, `experiments`, `summarize`, `doctor` |
 
 ## Data flow and label hiding
 
@@ -165,6 +166,40 @@ problems never raise: the result carries `ok=False` and a reason.
 and then `registry.register_model`; a failed export is a warning, the run's results stay intact.
 `export/registry.json` records the outcome and `results.collect` adds it, with `export.json`, as
 the `model` entry shown by `orbit results` and the HTML report.
+
+## Serving
+
+`orbit serve` runs a registered model with MLflow's own scoring server (`mlflow models serve`, which
+is uvicorn-based on Linux in the pinned MLflow version) inside a dedicated container started from
+`orbit-serve:latest` (`docker/serve.Dockerfile`): the sandbox image plus `mlflow` installed under
+constraints frozen from the sandbox's pins, so a model unpickles with the libraries it was fitted
+and verified with. The container only ever loads models that passed export verification.
+
+Where it runs, and why:
+
+- **Not on the host.** The model is a pickle; the host may lack its libraries, and orbit does not
+  load generated pickles outside a container.
+- **Not in the MLflow server's container.** Its image lacks the libraries, and that container holds
+  the tracking database and every artifact.
+- **Not in the sandbox.** The sandbox is built for untrusted code (no network, read-only root);
+  serving needs the network and a writable temp directory, and a separate image keeps those
+  settings out of the sandbox. `DockerSandbox` is unchanged.
+
+The container joins the Compose network the MLflow container is on (found by inspecting
+`orbit-mlflow-1`, falling back to `orbit_default`) and downloads the model through the tracking
+server's artifact proxy (`--serve-artifacts`), so it mounts none of MLflow's volume. It reaches the
+server by IP address on that network, since MLflow's Host-header check accepts private addresses by
+default but not the service name. Hardening that costs nothing is kept: `--cap-drop ALL`,
+`no-new-privileges`, a memory limit (`ORBIT_SERVE_MEMORY`, default 4g), `--pids-limit 512`, a tmpfs
+`/tmp`, a non-root user. The root filesystem stays writable and the network stays on.
+
+MLflow's scoring server has no authentication, so the port is published as
+`127.0.0.1:PORT:8080` and never on another interface. Containers are named `orbit-serve-<model>-<port>`
+and carry the labels `orbit.serve=1`, `orbit.model` (URI) and `orbit.version`; `--list` and
+`--stop` only consider containers that have both the name prefix and the label, and `orbit predict`
+finds a served model by the same labels. `orbit predict` is a plain `urllib` client: chunks of 500
+rows as `dataframe_records`, NaN as null, a 60 s timeout per request, the server's error message
+shown on failure.
 
 ## Reports and number verification
 

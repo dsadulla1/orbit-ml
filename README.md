@@ -95,6 +95,8 @@ labels.
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry (needs the LLM and Docker; `orbit run` does this itself unless `--no-export`) |
 | `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
+| `orbit serve MODEL [--version N \| --alias NAME] [--port P] [--name NAME]`, `orbit serve --list`, `orbit serve --stop NAME\|all` | Serve a registered model (`champion` by default) with MLflow's scoring server in a dedicated Docker container on 127.0.0.1 |
+| `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model) |
 | `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
@@ -163,6 +165,7 @@ All settings come from environment variables (or `.env` in the working directory
 | `ORBIT_SANDBOX_CPUS` / `ORBIT_SANDBOX_MEMORY` | `4` / `8g` | Per-experiment limits |
 | `ORBIT_SANDBOX_TIMEOUT` | `600` | Seconds per experiment |
 | `ORBIT_SANDBOX_RUNTIME` | unset | e.g. `runsc` for gVisor |
+| `ORBIT_SERVE_IMAGE` / `ORBIT_SERVE_MEMORY` | `orbit-serve:latest` / `4g` | Image and memory limit of `orbit serve` containers |
 | `MLFLOW_TRACKING_URI` | MLflow default | e.g. `http://localhost:5000` |
 | `ORBIT_EXPERIMENT` | named after the problem | MLflow experiment / W&B project to log to (`--experiment` wins) |
 | `ORBIT_TRACING` | on | `off` (or `0`, `false`, `no`) disables MLflow traces |
@@ -219,6 +222,44 @@ register models; W&B and `none` skip it.
 If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
 HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an
 outage costs seconds per experiment, not minutes; set those variables yourself to override.
+
+### Serving a model
+
+Build the serving image once (it extends the sandbox image, so build that first):
+
+```bash
+docker compose --env-file .env -f docker/compose.yaml build serve
+```
+
+Then serve a registered model; `MODEL` is a name (the version with the alias `champion`), or a
+`models:/...` URI, and `--version` or `--alias` pick another one:
+
+```bash
+uv run orbit serve retail-spend-90d --port 8099
+```
+
+orbit checks that the model exists, starts the container, waits until it answers and prints the
+endpoint, the container name and a `curl` command built from the model's saved input example. The
+request body is `{"dataframe_records": [{...raw feature columns...}]}` and the response is
+`{"predictions": [{"prediction": 55.47}]}`. Columns that are not features (the target, `orbit_id`,
+anything else) are ignored; a missing feature column is a 400 with the column's name.
+
+```bash
+uv run orbit predict retail-spend-90d new_customers.csv --out scored.csv   # or an http://127.0.0.1:PORT URL
+uv run orbit serve --list                                                 # running endpoints
+uv run orbit serve --stop all                                             # stop and remove them
+```
+
+`orbit predict` sends the rows in chunks of 500 and writes the `prediction` column in the
+input's order (`--keep-columns` repeats the input columns first).
+
+The container runs `mlflow models serve` with the sandbox's pinned libraries, so the model loads
+exactly as it was fitted. It downloads the model from the tracking server over the Compose
+network and mounts none of MLflow's data. The endpoint is published on 127.0.0.1 only and has no
+authentication: put your own proxy in front of it before exposing it to a network. MLflow's own
+Host-header check applies to the container's requests to the tracking server, so orbit points it
+at the server's address on the Compose network; if you restricted `MLFLOW_ALLOWED_HOSTS`, keep that
+address allowed. See [Serving](docs/DESIGN.md#serving).
 
 ## Querying runs from an AI assistant (MCP)
 

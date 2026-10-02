@@ -35,6 +35,15 @@ def test_template_report(clf_csv, tmp_path):
     assert check_numbers(md.split("## Summary")[1].split("_Narrative")[0], facts(task, journal)) == []
 
 
+def test_facts_flag_a_runner_up_inside_the_fold_spread(clf_csv, tmp_path):
+    task, journal = _finished_run(tmp_path, clf_csv, folds=3)
+    f = facts(task, journal)
+    assert f["baseline_is"].startswith("best constant")
+    ru = f["runner_up"]
+    assert ru["gap_to_best"] == pytest.approx(abs(f["best"]["val_score"] - ru["val_score"]), abs=1e-3)
+    assert isinstance(ru["within_fold_spread"], bool)
+
+
 def test_cross_validated_report_shows_spread(clf_csv, tmp_path):
     task, journal = _finished_run(tmp_path, clf_csv, folds=3)
     md, f = build(task, journal, llm=None)

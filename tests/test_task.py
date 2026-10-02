@@ -155,3 +155,23 @@ def test_rare_class_reduces_folds_or_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="both classes in every validation fold"):
         prepare(TaskSpec(data(1, "d"), "y"), tmp_path / "d")  # roc_auc cannot be scored on one positive
     assert prepare(TaskSpec(data(1, "e"), "y", metric="accuracy"), tmp_path / "e").baseline > 0.9
+
+
+def test_baseline_is_the_best_constant_for_each_metric():
+    import numpy as np
+
+    from orbit.metrics import METRICS, score
+    from orbit.task import _baseline, _best_constant
+
+    y = pd.Series([0.0, 0.0, 10.0, 1000.0, 20.0])
+    assert _best_constant(METRICS["rmse"], y) == y.mean()
+    assert _best_constant(METRICS["mae"], y) == y.median()
+    assert _best_constant(METRICS["rmsle"], y) == pytest.approx(np.expm1(np.log1p(y).mean()))
+    # For rmsle the training mean is a weak reference on skewed targets; the baseline must beat it.
+    rng = np.random.default_rng(0)
+    train = pd.Series(np.where(rng.random(400) < 0.4, 0.0, rng.lognormal(6, 1.5, 400)))
+    val = pd.Series(np.where(rng.random(200) < 0.4, 0.0, rng.lognormal(6, 1.5, 200)))
+    raw_mean = score(METRICS["rmsle"], val, pd.Series(train.mean(), index=val.index))
+    assert _baseline(METRICS["rmsle"], train, val, None) < raw_mean - 0.5
+    assert _baseline(METRICS["mae"], train, val, None) <= score(
+        METRICS["mae"], val, pd.Series(train.mean(), index=val.index))

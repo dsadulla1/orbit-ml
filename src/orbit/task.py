@@ -145,15 +145,25 @@ def profile(df: pd.DataFrame, target: str, max_cols: int = 60) -> str:
 
 
 def _baseline(metric: Metric, y_train: pd.Series, y_val: pd.Series, positive_label) -> float:
-    """Score of a model that ignores the features, so results have a reference point."""
+    """Score of the best constant prediction (it ignores the features), a fair reference point."""
     if metric.needs_proba:
         prior = float((y_train.astype(str) == str(positive_label)).mean())
         preds = pd.Series(prior, index=y_val.index)
     elif metric.kind == "classification":
         preds = pd.Series(y_train.astype(str).mode()[0], index=y_val.index)
     else:
-        preds = pd.Series(float(y_train.mean()), index=y_val.index)
+        preds = pd.Series(_best_constant(metric, y_train.astype(float)), index=y_val.index)
     return score(metric, y_val, preds, positive_label)
+
+
+def _best_constant(metric: Metric, y: pd.Series) -> float:
+    """The single value that scores best for `metric` on y: the mean minimises squared error, the
+    median absolute error, and the mean of log1p(y) the error between logs."""
+    if metric.name == "rmsle":
+        return float(np.expm1(np.log1p(y).mean()))
+    if metric.name == "mae":
+        return float(y.median())
+    return float(y.mean())
 
 
 def _split(df: pd.DataFrame, target: str, kind: str, size: float, seed: int):

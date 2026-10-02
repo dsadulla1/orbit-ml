@@ -15,8 +15,11 @@ from .task import Task
 
 NARRATOR_SYSTEM = """You write concise experiment reports for ML practitioners. \
 Use ONLY the numbers present in the FACTS JSON, copied with the same precision; never compute \
-or invent new figures. If evidence is weak (small gain over baseline, large validation/test gap, \
-many failures) say so plainly. No hype."""
+or invent new figures. The baseline is the best constant prediction that ignores the features, so \
+describe gains as a difference from it; never write "x times better" or percentage improvements. \
+Describe what a model does only as far as its plan text says; do not credit techniques that the \
+plan does not mention. If evidence is weak (small gain, a gain within the cross-validation spread, \
+large validation/test gap, many failures) say so plainly. No hype."""
 
 NARRATOR_USER = """FACTS:
 ```json
@@ -70,6 +73,7 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
         "validation": (f"mean of {task.n_folds}-fold cross-validation" if task.n_folds > 1
                        else "single validation split"),
         "baseline_val_score": _r(task.baseline),
+        "baseline_is": "best constant prediction that ignores the features",
         "experiments_run": len(journal.nodes),
         "experiments_failed": sum(n.buggy for n in journal.nodes),
         "debug_attempts": sum(n.stage == "debug" for n in journal.nodes),
@@ -92,8 +96,11 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
             out["first_working"] = {"experiment": first_ok.id, "val_score": _r(first_ok.metric)}
             out["gain_from_search"] = _r(sign * (best.metric - first_ok.metric))
         if len(ranked) > 1:
+            spread = _std(best) or 0.0
+            gap = abs(best.metric - ranked[1].metric)
             out["runner_up"] = {"experiment": ranked[1].id, "val_score": _r(ranked[1].metric),
-                                "plan": ranked[1].plan}
+                                "plan": ranked[1].plan, "gap_to_best": _r(gap),
+                                "within_fold_spread": bool(spread and gap <= spread)}
     out["leaderboard"] = [{"experiment": n.id, "stage": n.stage, "val_score": _r(n.metric),
                            "val_std": _std(n), "plan": n.plan[:160]} for n in ranked[:top]]
     return out
@@ -197,7 +204,8 @@ def template_narrative(f: dict) -> str:
         caveats.append(f"validation/test gap of {b['val_test_gap']} suggests some overfitting to validation")
     if f["experiments_failed"]:
         caveats.append(f"{f['experiments_failed']} of {f['experiments_run']} experiments failed")
-    if "runner_up" in f and abs(f["runner_up"]["val_score"] - b["val_score"]) < 0.005:
+    if "runner_up" in f and (f["runner_up"]["within_fold_spread"]
+                             or abs(f["runner_up"]["val_score"] - b["val_score"]) < 0.005):
         caveats.append(f"runner-up #{f['runner_up']['experiment']} is within noise "
                        f"({f['runner_up']['val_score']})")
     lines.append("**Caveats:** " + ("; ".join(caveats) + "." if caveats else "none significant."))

@@ -84,8 +84,10 @@ def test_mlflow_fails_fast_unless_configured(monkeypatch):
     assert os.environ["MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR"] == "5"
 
 
-def test_mlflow_console_announcements_are_silenced():
-    import logging
+def test_mlflow_console_announcements_are_silenced(monkeypatch):
+    import os
 
+    monkeypatch.setenv("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "x")  # registers it for cleanup
+    monkeypatch.delenv("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT")
     MLflowTracker()
-    assert logging.getLogger("mlflow.tracking.fluent").getEffectiveLevel() >= logging.WARNING
+    assert os.environ["MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT"] == "1"

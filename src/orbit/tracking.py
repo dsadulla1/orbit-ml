@@ -43,14 +43,14 @@ class MLflowTracker:
 
     def __init__(self, experiment: str = "orbit"):
         os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")  # quiet import-time banner
+        # With a tracking server MLflow prints "View run ... at ..." to stdout after every run; the
+        # CLI already shows one line per experiment.
+        os.environ.setdefault("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "1")
         # MLflow retries a dead server for about 4 minutes per call. Fail fast instead, so an
         # unreachable tracker costs seconds per logged experiment, not minutes.
         for key, value in MLFLOW_FAIL_FAST.items():
             os.environ.setdefault(key, value)
         import mlflow
-        # MLflow announces every finished run ("View run ... at ...") on the console; the CLI
-        # shows one line per experiment already.
-        logging.getLogger("mlflow").setLevel(logging.WARNING)
         self.mlflow = mlflow
         self.experiment = experiment
         self.parent = None

@@ -90,6 +90,12 @@ def test_review_catches_wrong_success_and_failure_counts(clf_csv, tmp_path):
     assert "revised after review" in md and "succeeded" in f["review_issues"][0]
 
 
+def test_review_rejects_claims_of_statistical_significance(clf_csv, tmp_path):
+    task, journal = _finished_run(tmp_path, clf_csv)
+    md, f = build(task, journal, llm=_Scripted("**Verdict:** experiment #1 won, a statistically significant gain.", GOOD))
+    assert "revised after review" in md and "significance" in f["review_issues"][0]
+
+
 def test_check_claims():
     f = {"experiments_run": 10, "experiments_failed": 1}
     assert check_claims("Only one experiment succeeded out of ten.", f) != []

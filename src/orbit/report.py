@@ -18,7 +18,7 @@ Use ONLY the numbers present in the FACTS JSON, copied with the same precision; 
 or invent new figures. The baseline is the best constant prediction that ignores the features, so \
 describe gains as a difference from it; never write "x times better" or percentage improvements. \
 Describe what a model does only as far as its plan text says; do not credit techniques that the \
-plan does not mention. If evidence is weak (small gain, a gain within the cross-validation spread, \
+plan does not mention. Never claim statistical significance: orbit runs no significance tests. If evidence is weak (small gain, a gain within the cross-validation spread, \
 large validation/test gap, many failures) say so plainly. No hype."""
 
 NARRATOR_USER = """FACTS:
@@ -230,10 +230,16 @@ def leaderboard_md(f: dict) -> str:
     return "\n".join(rows)
 
 
+_SIGNIFICANCE = re.compile(r"statistical(?:ly)?\s+significan\w*|\bsignificance\b", re.IGNORECASE)
+
+
 def review(narrative: str, f: dict) -> list[str]:
     """Everything wrong with a narrative that can be checked against the facts."""
-    return [f"number {n} does not appear in FACTS" for n in check_numbers(narrative, f)] + \
+    found = [f"number {n} does not appear in FACTS" for n in check_numbers(narrative, f)] + \
         check_claims(narrative, f)
+    if _SIGNIFICANCE.search(narrative):
+        found.append("claims statistical significance, but no significance test was run")
+    return found
 
 
 def _write(llm, f: dict) -> tuple[str, str, list[str]]:

@@ -103,6 +103,10 @@ some servers handle unreliably. `<think>` sections from reasoning models are str
 --user <host uid> -v <exp>:/work -v <input>:/work/data:ro orbit-sandbox python solution.py`
 
 - On timeout the container is killed by name.
+- While a container runs, a daemon thread polls `docker stats --no-stream` for it and the peak
+  memory and CPU go into `ExecResult`. This only observes the container from outside: it adds no
+  mounts, options or privileges to the `docker run` command, and polling errors (including polls
+  before the container exists) are ignored.
 - Threads are capped through `OMP_NUM_THREADS` and related variables; scripts read
   `ORBIT_N_JOBS`.
 - The image pins its libraries. pandas stays on 2.x because generated code mostly assumes
@@ -155,6 +159,14 @@ the template produces the same structure.
   turns tracing off for the run, while exceptions from the traced code pass through unchanged.
   `ORBIT_TRACING=off` disables it. Spans are recorded by the orchestrator only; traces contain the
   prompts, like the artifacts.
+- **Resource usage** (MLflow): the parent run is started with MLflow's system metrics (CPU,
+  memory, and GPU utilisation and memory through `nvidia-ml-py` when the driver is reachable; the
+  sampling interval defaults to 5 s). If starting with them fails, the run starts without and a
+  warning is logged. `ORBIT_SYSTEM_METRICS=off` disables them. Host metrics cannot tell
+  experiments apart, so each sandbox run is also sampled (see Sandbox); `Node.peak_mem_mb`
+  (maximum over folds) and `Node.cpu_pct` (mean of the per-fold means) are logged on the
+  experiment's run as `peak_mem_mb` and `cpu_pct_mean`, kept in `journal.json`, and shown in the
+  HTML report. Both are `None` when no sample was taken.
 - **W&B**: one run with per-step metrics, a summary table and the scripts as artifacts.
 
 The sandbox never talks to a tracker; it has no network and no credentials.

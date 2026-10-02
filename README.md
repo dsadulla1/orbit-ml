@@ -160,6 +160,7 @@ All settings come from environment variables (or `.env` in the working directory
 | `MLFLOW_TRACKING_URI` | MLflow default | e.g. `http://localhost:5000` |
 | `ORBIT_EXPERIMENT` | named after the problem | MLflow experiment / W&B project to log to (`--experiment` wins) |
 | `ORBIT_TRACING` | on | `off` (or `0`, `false`, `no`) disables MLflow traces |
+| `ORBIT_SYSTEM_METRICS` | on | `off` (or `0`, `false`, `no`) disables host system metrics on the MLflow parent run |
 | `WANDB_API_KEY` | unset | If set, W&B becomes the default tracker (`uv sync --extra wandb`) |
 
 `--tracker auto|mlflow|wandb|none` overrides the tracker choice per run.
@@ -178,6 +179,16 @@ durations and errors, so you can see how a step unfolded. Traces can be filtered
 prompts, which include the data profile and any documentation text you supplied, just like the
 artifacts do. Set `ORBIT_TRACING=off` to switch them off. A tracing error is logged once and
 tracing is then disabled for the run; the search carries on.
+
+With MLflow, the parent run also records host system metrics (CPU, memory and, when the NVIDIA
+driver is reachable, GPU utilisation and memory) every 5 seconds, which is useful when a local LLM
+server shares the machine. Each experiment's run gets `peak_mem_mb` and `cpu_pct_mean`, the
+sandbox container's peak memory and mean CPU (100 = one busy core; for cross-validation the
+maximum and the mean over folds), sampled with `docker stats` from outside the container, so you
+can see which experiment was heavy or close to its memory limit. The HTML report shows peak memory
+per experiment. Set `ORBIT_SYSTEM_METRICS=off` to skip the system metrics; the sampling interval
+follows `MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL`. Short experiments may finish before the first
+sample, in which case the values are left empty.
 
 If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
 HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an

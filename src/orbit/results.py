@@ -61,6 +61,7 @@ def collect(run_dir: Path) -> dict:
         "fold_scores": n.fold_scores, "test_score": n.test_metric,
         "error": _last_line(n.error), "seconds": round(n.duration, 1),
         "tokens": n.prompt_tokens + n.completion_tokens,
+        "peak_mem_mb": n.peak_mem_mb, "cpu_pct": n.cpu_pct,
     } for n in journal.nodes]
     best = journal.get(journal.best_id) if journal.best_id else None
     return {
@@ -104,6 +105,7 @@ def collect_mlflow(run_id: str, client=None) -> dict:
             "val_std": m.get("val_score_std"), "fold_scores": folds, "test_score": None,
             "seconds": round(m.get("duration_s", 0), 1),
             "tokens": int(m.get("prompt_tokens", 0) + m.get("completion_tokens", 0)),
+            "peak_mem_mb": m.get("peak_mem_mb"), "cpu_pct": m.get("cpu_pct_mean"),
             "artifact_uri": r.info.artifact_uri})
     pm = parent.data.metrics
     return {

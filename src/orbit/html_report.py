@@ -169,11 +169,11 @@ TEMPLATE = """<!doctype html>
 
 <h2>Experiments</h2>
 <div class="card scroll"><table>
-<tr><th>#</th><th>stage</th><th>parent</th><th>validation</th><th>test</th><th>seconds</th><th>approach</th></tr>
+<tr><th>#</th><th>stage</th><th>parent</th><th>validation</th><th>test</th><th>seconds</th><th>peak memory</th><th>approach</th></tr>
 {% for e in rows %}<tr class="{{ 'best' if e.best }}">
 <td class="n">{{ e.id }}</td><td>{{ e.stage }}</td><td class="n">{{ e.parent or '' }}</td>
 <td class="n">{% if e.status == 'ok' %}{{ e.val }}{% else %}<span class="fail">failed</span>{% endif %}</td>
-<td class="n">{{ e.test }}</td><td class="n">{{ e.seconds }}</td>
+<td class="n">{{ e.test }}</td><td class="n">{{ e.seconds }}</td><td class="n">{{ e.mem }}</td>
 <td>{% if e.status == 'ok' %}{{ e.plan }}{% else %}<span class="fail">{{ e.error }}</span> &middot; {{ e.plan }}{% endif %}</td></tr>
 {% endfor %}</table></div>
 
@@ -212,7 +212,8 @@ def render(data: dict) -> str:
     ]
     best_id = (data.get("best") or {}).get("id")
     rows = [{**e, "best": e["id"] == best_id, "val": _fmt(e["val_score"]) + (f" ± {_fmt(e['val_std'], 3)}" if e["val_std"] else ""),
-             "test": _fmt(e["test_score"]) if e["test_score"] is not None else ""} for e in exps]
+             "test": _fmt(e["test_score"]) if e["test_score"] is not None else "",
+             "mem": f"{e['peak_mem_mb']:,.0f} MB" if e.get("peak_mem_mb") is not None else ""} for e in exps]
     rows.sort(key=lambda r: (r["val_score"] is None,
                              -(r["val_score"] or 0) if task["greater_is_better"] else (r["val_score"] or 0)))
     tracker = data.get("tracker") or {}

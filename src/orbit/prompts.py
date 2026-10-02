@@ -24,6 +24,10 @@ verbose=-1 in the params or constructor.
 XGBoost takes early_stopping_rounds in the estimator's constructor, not in fit().
   * RMSE: sklearn.metrics.root_mean_squared_error (mean_squared_error has no squared= argument).
   * Format numbers with f-strings like f"{{score:.4f}}"; never mix f-strings with .format().
+- Text columns must be encoded before use with scikit-learn, XGBoost or LightGBM (ordinal, one-hot or \
+target encoding fitted on the training rows only; LightGBM also accepts the pandas category dtype). \
+Missing values exist unless the profile says 0%: impute them, or use a model that accepts NaN \
+(LightGBM, XGBoost, HistGradientBoosting); Ridge and LogisticRegression reject NaN.
 - Read training data from data/train.csv (features + target column {target!r}).
 - Read data/test.csv (features + an {id_col!r} column, no labels) and predict EVERY row.
 - Write predictions.csv in the current directory with exactly two columns: {id_col!r}, {pred_col!r}.
@@ -86,7 +90,9 @@ PLAN: {plan}
 {error}
 ```
 
-Fix the bug while keeping the experiment's intent. Return the full corrected script."""
+Fix the root cause while keeping the experiment's intent, and check the rest of the script for \
+the same mistake. Do not repeat a fix that has already failed; if unsure, switch to a simpler \
+approach. Return the full corrected script."""
 
 
 def prediction_rule(task) -> str:
@@ -95,7 +101,11 @@ def prediction_rule(task) -> str:
                 f"{task.spec.target!r} == {task.positive_label!r}.")
     if task.kind == "classification":
         return f"{PRED_COL!r} must be the predicted class label (one of {task.classes[:20]})."
-    return f"{PRED_COL!r} must be the predicted numeric value of {task.spec.target!r}."
+    rule = f"{PRED_COL!r} must be the predicted numeric value of {task.spec.target!r}."
+    if task.metric.needs_nonneg:
+        rule += (" Predictions must be >= 0: clip them, and if you model log1p of the target, "
+                 "convert back with expm1 before writing the file.")
+    return rule
 
 
 def system_prompt(task, timeout: int, cpus: float) -> str:

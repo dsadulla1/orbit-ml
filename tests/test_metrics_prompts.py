@@ -111,3 +111,23 @@ def test_rmsle_and_new_classification_metrics():
     yc = pd.Series(["a", "a", "a", "b"])
     assert score(METRICS["balanced_accuracy"], yc, pd.Series(["a"] * 4)) == 0.5
     assert score(METRICS["pr_auc"], yc, pd.Series([0.1, 0.2, 0.3, 0.9]), positive_label="b") == 1.0
+
+
+def test_prompts_cover_the_common_crashes():
+    text = SYSTEM.format(libraries="numpy", target="y", id_col="orbit_id", pred_col="prediction",
+                         prediction_rule="rule", timeout=60, cpus=2)
+    assert "Text columns must be encoded" in text and "Missing values exist" in text
+    from orbit.prompts import DEBUG
+    assert "Do not repeat a fix" in DEBUG
+
+
+def test_nonnegative_metrics_tell_the_model_to_clip(tmp_path):
+    from orbit.prompts import prediction_rule
+    from orbit.task import TaskSpec, prepare
+
+    path = tmp_path / "spend.csv"
+    pd.DataFrame({"x": range(60), "spend": [float(i) for i in range(60)]}).to_csv(path, index=False)
+    rule = prediction_rule(prepare(TaskSpec(str(path), "spend", metric="rmsle", folds=1), tmp_path / "a"))
+    assert ">= 0" in rule and "expm1" in rule
+    plain = prediction_rule(prepare(TaskSpec(str(path), "spend", metric="rmse", folds=1), tmp_path / "b"))
+    assert ">= 0" not in plain

@@ -284,9 +284,13 @@ def test_time_aware_task_loads(tmp_path):
 def test_helper_imports_only_numpy_pandas_stdlib():
     import ast
     tree = ast.parse(open(helpers.__file__).read())
-    roots = {n.names[0].name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)}
-    roots |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    # scikit-learn is optional: its import sits in a try/except ImportError at the top
+    optional = {id(n) for t in tree.body if isinstance(t, ast.Try) for n in ast.walk(t)}
+    required = [n for n in ast.walk(tree) if id(n) not in optional]
+    roots = {n.names[0].name.split(".")[0] for n in required if isinstance(n, ast.Import)}
+    roots |= {n.module.split(".")[0] for n in required if isinstance(n, ast.ImportFrom)}
     assert roots <= {"json", "math", "pathlib", "numpy", "pandas"}
+    assert "sklearn" in ast.unparse(tree)
 
 
 HELPER_CLF = """PLAN: Helper-based logistic regression.
@@ -338,3 +342,75 @@ def test_save_error_reaches_the_debug_prompt(clf_csv, tmp_path):
     journal = agent.run()
     assert journal.nodes[0].buggy and "needs probabilities" in journal.nodes[0].error
     assert not journal.nodes[1].buggy
+
+
+# ---- Preprocessor -------------------------------------------------------------------------
+
+def _raw():
+    return pd.DataFrame({
+        "num": [1.0, np.nan, 3.0, 5.0],
+        "city": ["b", "a", None, "b"],
+        "flag": [True, False, True, False],
+        "ident": [10, 11, 12, 13],
+    })
+
+
+def test_preprocessor_encodes_text_and_fills_numbers():
+    raw = _raw()
+    out = helpers.Preprocessor(drop=["ident"]).fit(raw).transform(raw)
+    assert list(out.columns) == ["num", "city", "flag"]
+    assert out["num"].tolist() == [1.0, 3.0, 3.0, 5.0]       # median of 1, 3, 5
+    assert out["city"].tolist() == [1, 0, -1, 1]              # sorted ranks, missing -> -1
+    assert out["flag"].tolist() == [1, 0, 1, 0]               # False < True as strings
+    assert not out.isna().any().any()
+
+
+def test_preprocessor_unseen_text_and_fill_false():
+    pre = helpers.Preprocessor(fill=False).fit(_raw())
+    new = pd.DataFrame({"num": [np.nan], "city": ["zz"], "flag": [None], "ident": [1]})
+    out = pre.transform(new)
+    assert out["city"].tolist() == [-1] and out["flag"].tolist() == [-1]
+    assert out["num"].isna().all()
+    assert pre.set_params(fill=True).transform(new)["num"].tolist() == [3.0]
+
+
+def test_preprocessor_all_missing_numeric_uses_zero():
+    raw = pd.DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+    assert helpers.Preprocessor().fit(raw).transform(raw)["a"].tolist() == [0.0, 0.0]
+
+
+def test_preprocessor_selects_by_name_and_reports_missing():
+    pre = helpers.Preprocessor(drop=["ident"]).fit(_raw())
+    shuffled = _raw()[["flag", "ident", "city", "num"]].assign(extra=1)
+    assert pre.transform(shuffled).equals(pre.transform(_raw()))
+    with pytest.raises(ValueError, match=r"\['city', 'flag'\]"):
+        pre.transform(_raw()[["num", "ident"]])
+    with pytest.raises(ValueError, match="DataFrame"):
+        pre.transform(np.zeros((2, 3)))
+
+
+def test_preprocessor_params_clone_names_and_determinism():
+    from sklearn.base import clone
+    pre = helpers.Preprocessor(fill=False, drop=["ident"])
+    assert clone(pre).get_params() == {"fill": False, "drop": ["ident"]}
+    fitted = pre.fit(_raw())
+    assert list(fitted.get_feature_names_out()) == ["num", "city", "flag"]
+    again = helpers.Preprocessor(fill=False, drop=["ident"]).fit(_raw().iloc[::-1])
+    assert again.codes_ == fitted.codes_ and again.medians_ == fitted.medians_
+    out = helpers.Preprocessor().set_output(transform="pandas").fit(_raw()).transform(_raw())
+    assert isinstance(out, pd.DataFrame)
+
+
+def test_preprocessor_pipeline_pickles_and_predicts_identically(orbit_helpers):
+    import pickle
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    raw = _raw().assign(ident=range(4))
+    y = np.array([0, 1, 0, 1])
+    model = Pipeline([("prep", orbit_helpers.Preprocessor(drop=["ident"])),
+                      ("clf", LogisticRegression())]).fit(raw, y)
+    blob = pickle.dumps(model, protocol=4)
+    assert b"orbit_helpers" in blob and b"orbit.helpers" not in blob
+    loaded = pickle.loads(blob)
+    assert np.array_equal(loaded.predict_proba(raw), model.predict_proba(raw))
+    assert np.array_equal(loaded.predict_proba(raw.iloc[::-1]), model.predict_proba(raw.iloc[::-1]))

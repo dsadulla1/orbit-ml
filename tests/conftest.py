@@ -99,3 +99,16 @@ def reg_csv(tmp_path) -> Path:
     path = tmp_path / "reg.csv"
     df.to_csv(path, index=False)
     return path
+
+
+@pytest.fixture
+def orbit_helpers(monkeypatch):
+    """`helpers.py` imported as the module `orbit_helpers`, the name it has inside the sandbox,
+    so pickles of its classes refer to the same module path as exported models."""
+    import importlib.util
+    import orbit.helpers
+    spec = importlib.util.spec_from_file_location("orbit_helpers", orbit.helpers.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "orbit_helpers", module)
+    spec.loader.exec_module(module)
+    return module

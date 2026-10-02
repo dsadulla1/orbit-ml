@@ -20,6 +20,9 @@ as `orbit_helpers.py`; it imports only numpy, pandas and the standard library, a
     save(predictions, path="predictions.csv")
                            validates and writes predictions.csv (see `Data.save`)
 
+`Preprocessor(fill=True, drop=())` is a scikit-learn transformer for the final, exported model: put
+it first in a `Pipeline` so the pickled model takes raw feature rows (see `Preprocessor`).
+
 Text columns are encoded with one mapping built from the train and test feature values together
 (never labels), so every category in the test rows has a code. Codes are the ranks of the sorted
 distinct values as strings (0, 1, 2, ...); missing text stays NaN. Encoded columns are int64, or
@@ -31,6 +34,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+try:  # optional: the module imports without scikit-learn, but Preprocessor is then a plain class
+    from sklearn.base import BaseEstimator, TransformerMixin
+except ImportError:  # pragma: no cover
+    BaseEstimator = TransformerMixin = object
 
 ID_COL = "orbit_id"
 PRED_COL = "prediction"
@@ -147,6 +155,63 @@ class Data:
                 note = f" ({self.metric} needs >= 0: negative predictions clipped to 0)"
         pd.DataFrame({ID_COL: self.test_ids, PRED_COL: arr}).to_csv(path, index=False)
         print(f"saved {n} predictions to {path}{note}")
+
+
+class Preprocessor(BaseEstimator, TransformerMixin):
+    """Turns raw feature rows into a numeric frame, inside a scikit-learn `Pipeline`.
+
+    `fit(X)` takes a DataFrame of raw feature columns (text, bools, numbers, NaN) and learns the
+    kept columns (all but `drop`, in order), a code for every distinct text value (ranks of the
+    sorted values as strings, as in `load()`) and the median of every numeric column (0 if all
+    missing). `transform(X)` selects the columns by name, so column order and extra columns do not
+    matter, and returns floats and ints only: text that is unseen or missing becomes -1, numeric
+    NaN becomes the median when `fill` is true and stays NaN otherwise. Put the id column in `drop`.
+    The fitted state is plain dicts, so a pipeline holding it pickles and loads anywhere
+    `orbit_helpers` is importable."""
+
+    def __init__(self, fill=True, drop=()):
+        self.fill = fill
+        self.drop = drop
+
+    def fit(self, X, y=None):
+        X = _frame(X)
+        drop = set(self.drop)
+        self.columns_ = [c for c in X.columns if c not in drop]
+        self.codes_, self.medians_ = {}, {}
+        for c in self.columns_:
+            if _is_numeric(X[c]):
+                med = X[c].median()
+                self.medians_[c] = float(med) if pd.notna(med) else 0.0
+            else:
+                seen = X[c].dropna().astype(str).unique()
+                self.codes_[c] = {v: i for i, v in enumerate(sorted(seen))}
+        return self
+
+    def transform(self, X):
+        X = _frame(X)
+        missing = [c for c in self.columns_ if c not in X.columns]
+        if missing:
+            raise ValueError(f"Preprocessor needs the columns {missing} but the input has "
+                             f"{list(X.columns)[:20]}.")
+        out = {}
+        for c in self.columns_:
+            s = X[c]
+            if c in self.codes_:
+                out[c] = s.astype(str).where(s.notna()).map(self.codes_[c]).fillna(-1).astype("int64")
+            else:
+                s = pd.to_numeric(s, errors="coerce").astype("float64")
+                out[c] = s.fillna(self.medians_[c]) if self.fill else s
+        return pd.DataFrame(out, index=X.index, columns=self.columns_)
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self.columns_, dtype=object)
+
+
+def _frame(X) -> pd.DataFrame:
+    if not isinstance(X, pd.DataFrame):
+        raise ValueError("Preprocessor works on a pandas DataFrame with the named raw feature "
+                         f"columns, not {type(X).__name__}.")
+    return X
 
 
 def _check_finite(arr: np.ndarray) -> None:

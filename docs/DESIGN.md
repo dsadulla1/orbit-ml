@@ -145,6 +145,16 @@ the template produces the same structure.
   `orbit.validation`, `orbit.data_fingerprint` (rows and a sha256 prefix of the primary table),
   `orbit.version`, and carries a Markdown note (`mlflow.note.content`). `tracking.json` in the run
   folder records the URI, experiment name and id, and run id.
+- **Traces** (MLflow): one trace per search step, in the problem's experiment. The root span
+  `orbit.step` (node id, stage, parent, final status, validation score, last error line) has child
+  spans `llm` (model, token counts), `sandbox` (one per fold: seconds, ok, timed out) and `score`
+  (one per fold). Traces are tagged `orbit.node`, `orbit.stage` and `orbit.status`. The OpenAI SDK
+  is auto-instrumented, so each chat completion (the report narrator's too) shows up as a span
+  nested inside orbit's. The agent only calls `tracker.span(name, **attributes)`, a context manager
+  that is a no-op for the other trackers; a failure of the tracing machinery logs one warning and
+  turns tracing off for the run, while exceptions from the traced code pass through unchanged.
+  `ORBIT_TRACING=off` disables it. Spans are recorded by the orchestrator only; traces contain the
+  prompts, like the artifacts.
 - **W&B**: one run with per-step metrics, a summary table and the scripts as artifacts.
 
 The sandbox never talks to a tracker; it has no network and no credentials.

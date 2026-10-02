@@ -159,6 +159,7 @@ All settings come from environment variables (or `.env` in the working directory
 | `ORBIT_SANDBOX_RUNTIME` | unset | e.g. `runsc` for gVisor |
 | `MLFLOW_TRACKING_URI` | MLflow default | e.g. `http://localhost:5000` |
 | `ORBIT_EXPERIMENT` | named after the problem | MLflow experiment / W&B project to log to (`--experiment` wins) |
+| `ORBIT_TRACING` | on | `off` (or `0`, `false`, `no`) disables MLflow traces |
 | `WANDB_API_KEY` | unset | If set, W&B becomes the default tracker (`uv sync --extra wandb`) |
 
 `--tracker auto|mlflow|wandb|none` overrides the tracker choice per run.
@@ -169,6 +170,14 @@ problem again adds another run to the same experiment; each run is tagged with i
 validation scheme and a data fingerprint (row count and file hash) so attempts can be told apart.
 `orbit experiments` lists them. An experiment deleted in the MLflow UI is restored when its name is
 used again.
+
+With MLflow, every search step is also recorded as a trace in the problem's experiment: the
+prompt, the model call (including token counts), each fold's sandbox execution and scoring, with
+durations and errors, so you can see how a step unfolded. Traces can be filtered by the tags
+`orbit.node`, `orbit.stage` and `orbit.status`, and the HTML report links to them. They contain the
+prompts, which include the data profile and any documentation text you supplied, just like the
+artifacts do. Set `ORBIT_TRACING=off` to switch them off. A tracing error is logged once and
+tracing is then disabled for the run; the search carries on.
 
 If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
 HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an

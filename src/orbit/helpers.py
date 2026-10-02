@@ -17,6 +17,8 @@ as `orbit_helpers.py`; it imports only numpy, pandas and the standard library, a
                            positive label and a 0/1 array for it (else None)
     test_ids               `orbit_id` values in test order
     extra(name), extra_names   additional tables from data/extra/<name>.csv
+    expm1_nonneg, clip_nonneg, ClipOutput
+                           picklable post-processing for exported models (see the export prompt)
     save(predictions, path="predictions.csv")
                            validates and writes predictions.csv (see `Data.save`)
 
@@ -42,6 +44,18 @@ except ImportError:  # pragma: no cover
 
 ID_COL = "orbit_id"
 PRED_COL = "prediction"
+
+
+def expm1_nonneg(y):
+    """numpy.expm1 clipped at 0: the inverse of log1p for non-negative targets, usable as the
+    `inverse_func` of sklearn's TransformedTargetRegressor (a module-level function pickles by
+    reference, which a function defined in a script would not)."""
+    return np.clip(np.expm1(y), 0, None)
+
+
+def clip_nonneg(y):
+    """Predictions clipped at 0 (for metrics such as rmsle that reject negative values)."""
+    return np.clip(y, 0, None)
 
 
 def _is_numeric(s: pd.Series) -> bool:
@@ -155,6 +169,29 @@ class Data:
                 note = f" ({self.metric} needs >= 0: negative predictions clipped to 0)"
         pd.DataFrame({ID_COL: self.test_ids, PRED_COL: arr}).to_csv(path, index=False)
         print(f"saved {n} predictions to {path}{note}")
+
+
+class ClipOutput(BaseEstimator):
+    """Wraps an estimator (typically a Pipeline or TransformedTargetRegressor) and clips its numeric
+    predictions to [lower, upper], so post-processing travels inside the pickled model. Other
+    methods (`predict_proba`, `classes_`) pass through to the wrapped estimator."""
+
+    def __init__(self, estimator, lower=None, upper=None):
+        self.estimator, self.lower, self.upper = estimator, lower, upper
+
+    def fit(self, X, y=None, **fit_params):
+        self.estimator.fit(X, y, **fit_params)
+        return self
+
+    def predict(self, X):
+        return np.clip(np.asarray(self.estimator.predict(X), dtype=float), self.lower, self.upper)
+
+    def predict_proba(self, X):
+        return self.estimator.predict_proba(X)
+
+    @property
+    def classes_(self):
+        return self.estimator.classes_
 
 
 class Preprocessor(BaseEstimator, TransformerMixin):

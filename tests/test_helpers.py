@@ -414,3 +414,14 @@ def test_preprocessor_pipeline_pickles_and_predicts_identically(orbit_helpers):
     loaded = pickle.loads(blob)
     assert np.array_equal(loaded.predict_proba(raw), model.predict_proba(raw))
     assert np.array_equal(loaded.predict_proba(raw.iloc[::-1]), model.predict_proba(raw.iloc[::-1]))
+
+
+def test_postprocessing_functions_clip_and_pickle_by_reference(orbit_helpers):
+    import pickle
+
+    import numpy as np
+
+    assert orbit_helpers.expm1_nonneg(np.array([-5.0, 0.0, np.log1p(9.0)])).tolist() == pytest.approx([0.0, 0.0, 9.0])
+    assert orbit_helpers.clip_nonneg(np.array([-1.0, 2.0])).tolist() == [0.0, 2.0]
+    blob = pickle.dumps(orbit_helpers.expm1_nonneg, protocol=4)
+    assert b"orbit_helpers" in blob and b"expm1_nonneg" in blob

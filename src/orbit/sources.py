@@ -1,11 +1,13 @@
 """Resolve user-supplied data sources (local files, directories, URLs, zip archives).
 
 Everything here runs on the orchestrator, never in the sandbox. Sources are copied into the run
-directory so a run stays self-contained. Tables (CSV/TSV, optionally gzipped) and short text
-documents (data descriptions, READMEs) are collected; anything else is skipped with a note.
+directory so a run stays self-contained. Tables (CSV/TSV, optionally gzipped, and Excel .xlsx/.xlsm
+workbooks, whose sheets are converted to CSV next to the workbook) and short text documents (data
+descriptions, READMEs) are collected; anything else is skipped with a note.
 
 URLs are fetched with the host's network access, so only point orbit at sources you trust.
 """
+import re
 import shutil
 import urllib.parse
 import urllib.request
@@ -13,8 +15,13 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
+
 TABLE_SUFFIXES = (".csv", ".tsv", ".csv.gz", ".tsv.gz")
 DOC_SUFFIXES = (".txt", ".md", ".rst")
+EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+SUPPORTED = "CSV, TSV, gzip, zip, Excel .xlsx, or .txt/.md/.rst documents"
+MAX_NOTES = 10  # skipped-file notes kept per run; the rest are only counted
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 200
@@ -23,7 +30,10 @@ MAX_DEPTH = 3
 # become an input table), tracker output and tooling.
 SKIP_DIRS = {"runs", "hidden", "mlruns", "wandb", "__pycache__", "node_modules", "venv"}
 _CONTENT_TYPES = {"text/csv": ".csv", "text/tab-separated-values": ".tsv", "text/plain": ".txt",
-                  "application/zip": ".zip", "application/gzip": ".csv.gz"}
+                  "application/zip": ".zip", "application/gzip": ".csv.gz",
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                  "application/vnd.ms-excel": ".xls"}
+_XLS_NOTE = "old .xls format is not supported; save it as .xlsx or CSV"
 
 
 class SourceError(ValueError):
@@ -35,6 +45,8 @@ class Resolved:
     tables: list[Path] = field(default_factory=list)
     docs: list[Path] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    skipped: int = 0  # files skipped so far (only the first few get a note)
+    converted_bytes: int = 0  # CSV written from Excel sheets
 
 
 def is_url(source: str) -> bool:
@@ -51,7 +63,17 @@ def _kind(path: Path) -> str | None:
         return "doc"
     if name.endswith(".zip"):
         return "zip"
+    if name.endswith(EXCEL_SUFFIXES):
+        return "xlsx"
+    if name.endswith(".xls"):
+        return "xls"
     return None
+
+
+def _skip(out: Resolved, name: str, why: str) -> None:
+    if out.skipped < MAX_NOTES:
+        out.notes.append(f"skipped {name}: {why}")
+    out.skipped += 1
 
 
 class _HttpOnly(urllib.request.HTTPRedirectHandler):
@@ -76,7 +98,7 @@ def download(url: str, dest_dir: Path, max_bytes: int = MAX_DOWNLOAD_BYTES, time
             ctype = resp.headers.get_content_type()
             if ctype not in _CONTENT_TYPES:
                 raise SourceError(f"{url}: unsupported file type {name!r} ({ctype}); "
-                                  "expected CSV, TSV, gzip, zip or a text document")
+                                  f"expected {SUPPORTED}")
             name += _CONTENT_TYPES[ctype]
         length = resp.headers.get("Content-Length", "")
         if length.isdigit() and int(length) > max_bytes:
@@ -115,10 +137,52 @@ def _unzip(archive: Path, dest: Path, max_bytes: int = MAX_UNZIPPED_BYTES) -> Pa
     return out
 
 
+def _convert_workbook(path: Path, out: Resolved) -> list[Path]:
+    """Write every sheet with data to a CSV next to the workbook and return those paths.
+
+    Sheets are read one at a time; dates are written by pandas as ISO strings (the time of day is
+    kept unless every value is midnight). Unreadable workbooks raise SourceError."""
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        if magic != b"PK\x03\x04":
+            raise SourceError(f"{path.name}: not a readable .xlsx workbook (it may be password-protected, "
+                              "an old .xls file renamed, or corrupt)")
+        with zipfile.ZipFile(path) as z:  # a workbook is a zip: refuse decompression bombs
+            if sum(i.file_size for i in z.infolist()) > MAX_UNZIPPED_BYTES:
+                raise SourceError(f"{path.name}: the workbook expands to more than "
+                                  f"{MAX_UNZIPPED_BYTES / 1e9:.0f} GB")
+        tables: list[Path] = []
+        with pd.ExcelFile(path, engine="openpyxl") as book:
+            names = [str(n) for n in book.sheet_names]
+            for sheet in names:
+                df = book.parse(sheet)
+                if df.empty or df.shape[1] == 0:
+                    _skip(out, f"{path.name} [{sheet}]", "sheet has no data")
+                    continue
+                label = re.sub(r"[^A-Za-z0-9_-]+", "_", sheet).strip("_") or "sheet"
+                stem = path.stem if len(names) == 1 else f"{path.stem}__{label}"
+                csv, n = path.with_name(stem + ".csv"), 2
+                while csv.exists():
+                    csv, n = path.with_name(f"{stem}_{n}.csv"), n + 1
+                df.to_csv(csv, index=False)
+                out.converted_bytes += csv.stat().st_size
+                if out.converted_bytes > MAX_UNZIPPED_BYTES or len(out.tables) + len(tables) >= MAX_FILES:
+                    raise SourceError(f"{path.name}: too many or too large sheets to convert")
+                tables.append(csv)
+                del df
+    except SourceError:
+        raise
+    except Exception as e:  # noqa: BLE001 - corrupt zip, bad XML, missing parts, encryption
+        raise SourceError(f"{path.name}: could not read the Excel workbook "
+                          f"({type(e).__name__}: {str(e)[:120]})") from e
+    return tables
+
+
 def _collect(path: Path, dest: Path, out: Resolved, depth: int = 0) -> None:
     if path.is_dir():
         if depth > MAX_DEPTH:
-            out.notes.append(f"skipped {path.name}/: nested more than {MAX_DEPTH} levels deep")
+            _skip(out, f"{path.name}/", f"nested more than {MAX_DEPTH} levels deep")
             return
         for child in sorted(path.iterdir()):
             if not child.name.startswith("."):
@@ -129,10 +193,14 @@ def _collect(path: Path, dest: Path, out: Resolved, depth: int = 0) -> None:
         _collect(_unzip(path, dest), dest, out, depth + 1)
     elif kind == "table":
         out.tables.append(path)
+    elif kind == "xlsx":
+        out.tables.extend(_convert_workbook(path, out))
+    elif kind == "xls":
+        _skip(out, path.name, _XLS_NOTE)
     elif kind == "doc":
         out.docs.append(path)
     elif not path.name.startswith("."):
-        out.notes.append(f"skipped {path.name}: unsupported file type")
+        _skip(out, path.name, "unsupported file type")
 
 
 def resolve(sources: list[str], dest: Path) -> Resolved:
@@ -152,24 +220,33 @@ def resolve(sources: list[str], dest: Path) -> Resolved:
         home.mkdir(parents=True, exist_ok=True)
         if path.is_dir():
             copied = home / path.name
-            _copy_tree(path, copied, avoid=dest)
+            _copy_tree(path, copied, avoid=dest, out=out)
             _collect(copied, home, out)
         else:
-            if _kind(path) is None:
-                raise SourceError(f"{source!r}: unsupported file type; expected CSV, TSV, gzip, "
-                                  "zip or a text document")
+            kind = _kind(path)
+            if kind == "xls":
+                raise SourceError(f"{source!r}: {_XLS_NOTE}")
+            if kind is None:
+                raise SourceError(f"{source!r}: unsupported file type; expected {SUPPORTED}")
             shutil.copy2(path, home / path.name)
             _collect(home / path.name, home, out)
     if len(out.tables) + len(out.docs) > MAX_FILES:
         raise SourceError(f"more than {MAX_FILES} files found; point orbit at a smaller folder")
+    if out.skipped > MAX_NOTES:
+        out.notes.append(f"... and {out.skipped - MAX_NOTES} more files skipped")
     if not out.tables:
-        raise SourceError("no CSV/TSV table found in the given sources")
+        found = "; ".join(n.removeprefix("skipped ") for n in out.notes[:MAX_NOTES])
+        raise SourceError("no CSV/TSV or Excel table found in the given sources"
+                          + (f" (skipped: {found})" if found else "")
+                          + (f"; found {len(out.docs)} text document(s) but no data" if out.docs else "")
+                          + f". Supported: {SUPPORTED}.")
     return out
 
 
-def _copy_tree(src: Path, dst: Path, avoid: Path | None = None) -> None:
+def _copy_tree(src: Path, dst: Path, avoid: Path | None = None, out: Resolved | None = None) -> None:
     """Copy a directory without following symlinks. Skips hidden and tool folders, orbit run
-    folders, the destination (`avoid`), and stops at the file-count and byte limits."""
+    folders, the destination (`avoid`), and stops at the file-count and byte limits. Files of
+    unsupported types are not copied; they are noted on `out`."""
     avoid = avoid.resolve() if avoid else None
     # Folders that are orbit runs (task.json next to hidden/), wherever they were saved.
     runs = [t.parent for t in src.rglob("task.json") if (t.parent / "hidden").is_dir()]
@@ -182,6 +259,8 @@ def _copy_tree(src: Path, dst: Path, avoid: Path | None = None) -> None:
             continue
         if len(rel.parts) > MAX_DEPTH + 1 and p.is_file():
             continue
+        if p.is_file() and _kind(p) is None and out is not None:
+            _skip(out, p.name, "unsupported file type")
         if p.is_file() and _kind(p) is not None:
             count += 1
             total += p.stat().st_size

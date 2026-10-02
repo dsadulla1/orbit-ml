@@ -3,6 +3,7 @@ import http.server
 import threading
 import zipfile
 
+import pandas as pd
 import pytest
 
 from orbit import sources
@@ -116,3 +117,82 @@ def test_directory_copy_skips_earlier_runs_and_the_output_folder(tmp_path):
     run_dir = proj / "results" / "run1"
     r = resolve([str(proj)], run_dir / "source")
     assert [p.name for p in r.tables] == ["data.csv"]
+
+
+def _book(path, sheets):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path) as w:
+        for name, df in sheets.items():
+            df.to_excel(w, sheet_name=name, index=False)
+    return path
+
+
+def test_xlsx_single_sheet_keeps_datetimes(tmp_path):
+    df = pd.DataFrame({"when": pd.to_datetime(["2010-12-01 08:26:00", "2011-01-02 17:05:30"]), "n": [1, 2]})
+    r = resolve([str(_book(tmp_path / "in" / "Online Retail.xlsx", {"Sheet1": df}))], tmp_path / "src")
+    assert [p.name for p in r.tables] == ["Online Retail.csv"]
+    text = r.tables[0].read_text()
+    assert "2010-12-01 08:26:00" in text and "2011-01-02 17:05:30" in text
+
+
+def test_xlsx_several_sheets_skips_empty_and_sanitizes(tmp_path):
+    book = _book(tmp_path / "w.xlsx", {"Train 1!": pd.DataFrame({"a": [1]}), "Empty": pd.DataFrame(),
+                                      "test": pd.DataFrame({"a": [2]})})
+    r = resolve([str(book)], tmp_path / "src")
+    assert sorted(p.name for p in r.tables) == ["w__Train_1.csv", "w__test.csv"]
+    assert any("Empty" in n and "no data" in n for n in r.notes)
+
+
+def test_xlsx_inside_zip_and_folder(tmp_path):
+    book = _book(tmp_path / "b" / "d.xlsx", {"S": pd.DataFrame({"a": [1, 2]})})
+    archive = tmp_path / "d.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.write(book, "inner/d.xlsx")
+    assert [p.name for p in resolve([str(archive)], tmp_path / "s1").tables] == ["d.csv"]
+    assert [p.name for p in resolve([str(book.parent)], tmp_path / "s2").tables] == ["d.csv"]
+
+
+def test_xlsx_served_by_url(tmp_path):
+    book = _book(tmp_path / "web" / "data", {"S": pd.DataFrame({"a": [1, 2]})})
+
+    class H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(tmp_path / "web"), **k)
+
+        def guess_type(self, path):
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        r = resolve([f"http://127.0.0.1:{srv.server_port}/data"], tmp_path / "src")
+    finally:
+        srv.shutdown()
+    assert [p.name for p in r.tables] == ["data.csv"]
+
+
+def test_bad_workbooks_and_xls_are_readable_errors(tmp_path):
+    bad = _write(tmp_path / "bad.xlsx", "not a workbook")
+    with pytest.raises(SourceError, match="bad.xlsx.*password-protected"):
+        resolve([str(bad)], tmp_path / "a")
+    broken = tmp_path / "broken.xlsx"
+    with zipfile.ZipFile(broken, "w") as z:
+        z.writestr("junk.txt", "x")
+    with pytest.raises(SourceError, match="could not read the Excel workbook"):
+        resolve([str(broken)], tmp_path / "b")
+    old = _write(tmp_path / "old.xls", "x")
+    with pytest.raises(SourceError, match="save it as .xlsx"):
+        resolve([str(old)], tmp_path / "c")
+
+
+def test_no_table_error_says_what_was_found(tmp_path):
+    d = tmp_path / "d"
+    _write(d / "model.pkl", "x"); _write(d / "readme.txt", "x"); _write(d / "old.xls", "x")
+    with pytest.raises(SourceError) as e:
+        resolve([str(d)], tmp_path / "src")
+    msg = str(e.value)
+    assert "model.pkl: unsupported file type" in msg and "old.xls" in msg and "1 text document" in msg
+    assert "xlsx" in msg

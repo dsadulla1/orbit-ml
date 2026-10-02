@@ -463,6 +463,135 @@ def models():
     console.print(table)
 
 
+@app.command()
+def serve(
+    model: str = typer.Argument(None, help="Registered model name or a models:/... URI"),
+    version: int = typer.Option(None, "--version", help="Serve this version instead of the alias"),
+    alias: str = typer.Option(None, "--alias", help="Serve the version with this alias (default: champion)"),
+    port: int = typer.Option(None, "--port", help="Host port on 127.0.0.1 (default: 8090 or the next free one)"),
+    name: str = typer.Option(None, "--name", help="Container name (orbit-serve- is prepended if missing)"),
+    list_: bool = typer.Option(False, "--list", help="List running serving containers"),
+    stop: str = typer.Option(None, "--stop", help="Stop and remove a serving container by name, or `all`"),
+):
+    """Serve a registered model with MLflow's scoring server in a dedicated Docker container.
+
+    The container has the sandbox's pinned libraries plus MLflow, fetches the model from the
+    tracking server and listens on 127.0.0.1 only (no authentication). Build the image once with
+    `docker compose --env-file .env -f docker/compose.yaml build serve`.
+
+    Examples:
+      orbit serve retail-spend-90d
+      orbit serve retail-spend-90d --version 2 --port 8100
+      orbit serve --list
+      orbit serve --stop all
+    """
+    from . import serve as srv
+
+    try:
+        if list_ or stop:
+            _serve_manage(srv, list_, stop)
+        elif not model:
+            raise srv.ServeError("Give a model name (`orbit models` lists them), or use --list / --stop.")
+        else:
+            _serve_start(srv, model, version, alias, port, name)
+    except srv.ServeError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1)
+
+
+def _serve_manage(srv, list_: bool, stop: str | None):
+    containers = srv.list_containers()
+    if stop:
+        names = srv.stop_targets(containers, stop)
+        srv.remove(names)
+        console.print(f"Stopped {len(names)} serving container(s)" + (f": {escape(', '.join(names))}" if names else "."))
+        return
+    if not containers:
+        console.print("No orbit serving containers are running.")
+        return
+    table = Table(title="Serving containers")
+    for col in ("name", "model", "version", "endpoint", "up"):
+        table.add_column(col, overflow="fold")
+    for c in containers:
+        table.add_row(escape(c.name), escape(c.model), escape(c.version),
+                      f"http://127.0.0.1:{c.port}" if c.port else "", escape(c.uptime))
+    console.print(table)
+
+
+def _serve_start(srv, model: str, version: int | None, alias: str | None, port: int | None,
+                 name: str | None):
+    import os
+
+    from .tracking import configure_mlflow_env
+
+    uri = srv.model_uri(model, version, alias)
+    image = srv.image_name()
+    srv.check_docker(image)
+    tracking = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if not tracking.startswith("http"):
+        raise srv.ServeError("Serving needs an MLflow tracking server: set MLFLOW_TRACKING_URI "
+                             "(see `orbit doctor`).")
+    status = _check_mlflow()
+    if "failed" in status:
+        raise srv.ServeError(f"MLflow is not reachable at {tracking}.")
+    configure_mlflow_env()
+    import mlflow
+
+    model_name, model_version = srv.resolve_in_registry(
+        mlflow.MlflowClient(tracking_uri=tracking, registry_uri=tracking), uri)
+    network, inner_uri = srv.mlflow_endpoint()
+    host_port = srv.choose_port(port)
+    container = srv.container_name(model_name, host_port, name)
+    command = srv.run_command(container, uri, model_version, network, inner_uri, host_port, image,
+                              srv.memory_limit())
+    srv.start(command)
+    console.print(f"Started {escape(container)}; loading {escape(uri)} ...")
+    state = srv.wait_ready(host_port, lambda: srv.is_running(container))
+    if state != "ready":
+        tail = srv.logs_tail(container)
+        srv.remove([container])
+        why = "The container exited" if state == "exited" else "The server was not ready after 180 s"
+        raise srv.ServeError(f"{why}; the container was removed." + (f" Last log lines:\n{tail}" if tail else ""))
+    url = f"http://127.0.0.1:{host_port}"
+    shown = f"{model_name}" + (f" version {model_version}" if model_version else "")
+    console.print(f"[green]Serving[/] {escape(shown)} ({escape(uri)}) at {escape(url)}/invocations")
+    console.print(f"  container: {escape(container)}   (127.0.0.1 only, no authentication)")
+    console.print("  try it:")
+    console.print(escape(f"    {srv.curl_command(url, srv.fetch_input_example(uri))}"), soft_wrap=True)
+    console.print(f"  score a CSV: orbit predict {escape(url)} rows.csv --out predictions.csv")
+    console.print(f"  stop:        orbit serve --stop {escape(container)}")
+
+
+@app.command()
+def predict(
+    endpoint: str = typer.Argument(..., help="Endpoint URL (http://127.0.0.1:8090) or a served model name"),
+    rows: Path = typer.Argument(..., exists=True, dir_okay=False, help="CSV of raw feature rows"),
+    out: Path = typer.Option(Path("predictions.csv"), "--out", help="Where to write the predictions"),
+    target_col: str = typer.Option(None, "--target-col", help="Column to leave out of the request"),
+    keep_columns: bool = typer.Option(False, "--keep-columns", help="Repeat the input columns in the output"),
+):
+    """Score the rows of a CSV against a running `orbit serve` endpoint.
+
+    Rows are sent in chunks of 500; the output keeps their order, with one `prediction` column.
+
+    Examples:
+      orbit predict retail-spend-90d new_customers.csv --out scored.csv
+      orbit predict http://127.0.0.1:8090 new_customers.csv --keep-columns
+    """
+    from . import serve as srv
+
+    try:
+        url = endpoint if endpoint.startswith(("http://", "https://")) else srv.endpoint_for(
+            endpoint, srv.list_containers())
+        start = time.monotonic()
+        count = srv.predict_csv(url, rows, out, target_col=target_col, keep_columns=keep_columns)
+    except srv.ServeError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1)
+    console.print(f"Scored {count} rows against {escape(url)} in {time.monotonic() - start:.1f}s "
+                  f"-> {escape(str(out))}")
+
+
 def _score(text) -> str:
     try:
         return f"{float(text):.4f}"

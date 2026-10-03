@@ -22,7 +22,7 @@
 | `metrics.py` | Prediction-file validation, scoring and eval-wording matching (orchestrator side only; metrics come from a fixed registry, never from generated code) |
 | `agent.py` | Search policy, experiment loop, budgets, final test scoring |
 | `export.py` | Refit the best experiment on all labeled rows, save one pickled model, verify it by reloading it in the sandbox |
-| `pickle_scan.py` | Allow-list scan of a pickle stream (no unpickling) run before an exported model is loaded |
+| `pickle_scan.py` | Allow-list scan of a pickle stream (no unpickling) run before an exported model is loaded, and the AST check of the model's `orbit_custom.py` |
 | `orbit_model.py` | The MLflow pyfunc wrapper shipped inside every registered model (imports nothing from orbit) |
 | `registry.py` | Log the exported model to MLflow, register a version, set tags, description and the `champion` alias |
 | `serve.py` | Command builders and parsers behind `orbit serve` and `orbit predict`: model URIs, the serving container's `docker run`, Compose network discovery, readiness polling, listing and stopping, the CSV scoring client |
@@ -166,8 +166,13 @@ The LLM rewrites the best script so that it trains on all rows and builds one sc
 rows. Anything the script did to its predictions (a target transform, clipping) must live inside
 the pickled object, which `TransformedTargetRegressor` and `orbit_helpers.ClipOutput` /
 `expm1_nonneg` provide; for metrics that reject negative values the verifier and the served model
-clip at 0. Each attempt (up to three, later ones see the previous script and the rows that
-differ) is accepted only if:
+clip at 0. For probability metrics the saved classifier is fitted on `d.y_train_binary` or on the
+original labels. The class-label rule, identical in the verifier and in `orbit_model.py`: use the
+column of the positive label when it is among `classes_` (compared as text, so `1.0` equals `1`);
+otherwise, when `classes_` is exactly 0 and 1 (ints, floats or bools), use the column of `1`;
+otherwise fail with an error naming `classes_` and the positive label. Each attempt (up to three,
+later ones see the previous script and the rows that differ, and `orbit export --hint TEXT` adds the
+user's guidance) is accepted only if:
 
 1. the script exits cleanly and writes a regular `model.pkl` of at most 500 MB and valid predictions;
 2. `pickle_scan.scan` finds no disallowed global in the file. It walks the opcodes without
@@ -176,13 +181,30 @@ differ) is accepted only if:
    code. This is defence in depth, not a guarantee: a pickle is code, and an allow-listed library
    may still contain a harmful callable. The real boundary is that the model is only ever loaded in
    a dedicated container;
+   Classes and functions the pipeline needs itself (custom transformers, feature engineering) go in
+   one module file, `orbit_custom.py`, written next to `model.pkl`; the script imports it, so the
+   pickle refers to `orbit_custom.Name` and never to `__main__`. The scan allows the top-level
+   module name `orbit_custom` exactly (not submodules or prefixes) and still applies its deny-list
+   to the names inside it. The file itself must be a regular file of at most 200 KB and passes
+   `pickle_scan.check_module`, a static `ast` check: it may import only numpy, pandas, scipy,
+   scikit-learn, LightGBM, XGBoost, `orbit_helpers` and standard maths, text and typing modules; it
+   may not use star or relative imports, `eval`, `exec`, `compile`, `open`, `__import__`, `input`,
+   `globals`, `locals`, `vars`, `getattr`/`setattr` with a computed or dunder name, attributes such
+   as `__globals__`, `__subclasses__` or `__mro__`, writes to `__dict__`, file-reading attributes
+   such as `read_csv` or `load`, or its own `__reduce__`. This is defence in depth as well. The
+   verification directory gets a copy of the module so the fresh container can import it;
 3. an orbit-written verifier, run in a fresh sandbox container, loads `model.pkl`, predicts the raw
    check rows and reproduces the script's `predictions.csv` (`rtol=1e-5` for numbers, equal labels
    for class predictions). This shows the saved object works from raw rows and is not in-memory state.
 
 The accepted model is copied to `export/model.pkl` next to `sample_input.csv`,
-`sample_predictions.csv` and `export.json` (outcome and attempt notes, no code or data). Export
-problems never raise: the result carries `ok=False` and a reason.
+`sample_predictions.csv` and `export.json` (outcome and attempt notes, no code or data), and the
+accepted `orbit_custom.py` when the model uses one (`export.json` records `custom_module`, its size
+and sha256). Export problems never raise: the result carries `ok=False`, the raw error and
+`explanation`, a plain-words reason with the fix (`export.explain_failure`), also stored in
+`export.json`. The CLI prints the explanation, where the attempts are and an example
+`orbit export RUN_DIR --hint "..."` for the failure. A re-export of a run whose export failed puts
+the earlier explanation and error into its first prompt.
 
 `orbit run` (MLflow tracker, unless `--no-export`) and `orbit export RUN_DIR` call `export_best`
 and then `registry.register_model`; a failed export is a warning, the run's results stay intact.
@@ -288,7 +310,9 @@ flag is set.
   (`OrbitModel`) with the pickle and `orbit_meta.json` as artifacts and `orbit_helpers.py` as code,
   so the file runs where orbit is not installed. `load_context` unpickles with plain `pickle`; that
   is acceptable because the file passed the allow-list scan and the sandbox reload check at export
-  time and is only loaded inside the serving container. `predict` ignores the target, id column and
+  time and is only loaded inside the serving container. A model with an `orbit_custom.py` also
+  ships it as code (next to `orbit_helpers.py`, which MLflow puts on `sys.path` before unpickling),
+  tags the version `orbit.custom_code=true` and names the file's sha256 in the version description. `predict` ignores the target, id column and
   `orbit_id` if present and returns a Series named `prediction`. Logging itself never unpickles the
   model, since the host may lack its libraries and generated pickles are not loaded outside a
   container. `pip_requirements` are the sandbox's pins (`registry.PINNED`, tested against

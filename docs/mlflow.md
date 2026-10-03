@@ -66,6 +66,12 @@ pinned library versions as its requirements; it needs those versions to load. Ve
 the run, experiment, metric, validation and test scores, baseline, goal, validation scheme and data
 fingerprint.
 
+When the pipeline needs its own classes or functions, they travel in one module, `orbit_custom.py`,
+which export checked statically and ships as code in the model's `code/` folder. Such a version has
+the tag `orbit.custom_code=true`, and its description says that the model includes custom code from
+the experiment and gives the file's sha256; read the file in the model's artifacts before loading
+the model anywhere you trust. Loading the model imports that module.
+
 The alias `champion` marks the version to serve. It moves to a new version when there is no
 champion yet, when the new validation score is at least as good as the champion's, or when the two
 cannot be compared (a different metric or data fingerprint); `--force-champion` always moves it.
@@ -74,6 +80,12 @@ performance estimate is the search's cross-validation score and held-out test sc
 stored with the version, and not the refit's own predictions. `--no-export` skips this step; export
 and registration problems print a warning and never change a run's results. Only MLflow runs
 register models; W&B and `none` skip it. `orbit models` lists the registered models.
+
+A failed export prints why in plain words, where to look and how to retry. `export/export.json`
+holds the outcome (`error`, `explanation`, one note per attempt), and `export/attempt_N/` the
+prompt, reply, script and stderr of each attempt. Retry with extra guidance, for example
+`orbit export RUN_DIR --hint "Move the feature code into orbit_custom.py"` (at most 1000
+characters); the first prompt of the retry also includes how the previous export failed.
 
 ## Serving a model
 

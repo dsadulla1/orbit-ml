@@ -74,7 +74,8 @@ These are not style preferences. A change that breaks one will not be merged.
 5. **The LLM protocol is plain text:** `PLAN:` plus one fenced Python block. Do not require native
    tool calling.
 6. **Models are only loaded in the serving container.** Exports are verified in the sandbox and
-   scanned, never unpickled on the host.
+   scanned, never unpickled on the host. A model's own classes and functions live in
+   `orbit_custom.py`, which is AST-checked (`pickle_scan.check_module`) and shipped with the model.
 7. **Library lists agree.** `docker/sandbox-requirements.txt`, `prompts.LIBRARIES` and the pins in
    `registry.py` must list the same libraries; a test checks the registry pins. Rebuild the images
    after changing them. Keep pandas 2 in the sandbox on purpose: generated code assumes it.

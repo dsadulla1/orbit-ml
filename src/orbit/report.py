@@ -22,6 +22,10 @@ describe gains as a difference from it; never write "x times better" or percenta
 Describe what a model does only as far as its plan text says; do not credit techniques that the \
 plan does not mention. Never claim statistical significance: orbit runs no significance tests. If evidence is weak (small gain, a gain within the cross-validation spread, \
 large validation/test gap, many failures) say so plainly. No hype. \
+To judge whether the improvement is real, use gain_within_spread and gain_over_spread as given: \
+compare the GAIN over the baseline (never the score itself) with val_std_across_folds, say the gain \
+is within the spread when gain_within_spread is true and that it exceeds the spread when it is false, \
+and do not speculate about performance on the test set beyond the test_score in FACTS. \
 When distribution_shift.flag is true the validation and test splits have different target rates or \
 means, and therefore different baselines (val_baseline, test_baseline): explain any difference \
 between validation and test through those rates and baselines, compare val_gain with test_gain \
@@ -35,7 +39,8 @@ NARRATOR_USER = """FACTS:
 ```
 
 The validation score is described by the "validation" field; when it is a cross-validation \
-mean, val_std_across_folds is its spread, and a gain smaller than that spread is within noise. \
+mean, val_std_across_folds is its spread, and a gain over the baseline that is not larger than that \
+spread is within noise (gain_within_spread; gain_over_spread is their ratio). \
 The "splits" field gives the rows and target rate or mean of each split; val_gain and test_gain \
 are the gains over the baselines of the validation and test splits.
 
@@ -265,6 +270,11 @@ def facts(task: Task, journal: Journal, top: int = 5) -> dict:
                             else _r(sign * (best.test_metric - task.test_baseline)))
         if _std(best) is not None:
             out["best"]["val_std_across_folds"] = _std(best)
+        spread = out["best"].get("val_std_across_folds")
+        gain = out["best"]["gain_over_baseline"]
+        # The gain over the baseline, not the score, is what the fold spread has to be compared with.
+        out["gain_within_spread"] = bool(gain <= spread) if spread else None
+        out["gain_over_spread"] = _r(gain / spread, 2) if spread else None
         if best.test_metric is not None:
             out["best"]["val_test_gap"] = _r(abs(best.metric - best.test_metric))
         if first_ok and first_ok.id != best.id:
@@ -373,6 +383,9 @@ def template_narrative(f: dict) -> str:
         ev += (f"; search improved on the first working experiment "
                f"(#{f['first_working']['experiment']}, {f['first_working']['val_score']}) "
                f"by {f['gain_from_search']}")
+    if f.get("gain_within_spread") is False:
+        ev += (f"; the gain over the baseline ({f['val_gain']}) exceeds the spread across folds "
+               f"({b['val_std_across_folds']})")
     lines.append(ev + f", across {f['experiments_run']} experiments.")
     caveats = []
     shift = f.get("distribution_shift") or {}
@@ -392,6 +405,10 @@ def template_narrative(f: dict) -> str:
         caveats.append(f"validation/test gap of {b['val_test_gap']} suggests some overfitting to validation")
     if not f.get("has_spread", True):
         caveats.append(no_spread_caveat(f))
+    if f.get("gain_within_spread"):
+        caveats.append(f"the gain over the baseline ({f['val_gain']}) is not larger than the spread "
+                       f"across folds ({b['val_std_across_folds']}), so it is not evidence of a real "
+                       "improvement")
     if f["experiments_failed"]:
         caveats.append(f"{f['experiments_failed']} of {f['experiments_run']} experiments failed")
     if "runner_up" in f and (f["runner_up"]["within_fold_spread"]
@@ -446,6 +463,41 @@ def blames_overfitting(text: str) -> bool:
     return any(_OVERFIT.search(sent) and not _NEGATED.search(sent) for sent in _SENTENCE.split(text))
 
 
+_CLAUSE = re.compile(r"(?<=[.!?])\s+|\n+|;")
+_GAIN_WORD = re.compile(r"gain|improv|\blift|uplift|advantage|(?:over|above|beyond) (?:the )?baseline",
+                        re.IGNORECASE)
+_NOISE = r"(?:spread|noise|variab\w+|variation|standard deviation)"
+_REAL_GAIN = re.compile(r"\b(?:real|clear|genuine|meaningful|true|robust|reliable)\s+(?:\w+\s+)?"
+                        r"(?:gain|improvement|improvements|benefit|uplift|signal|advantage)\b"
+                        rf"|\b(?:exceed\w*|beat\w*|surpass\w*|above|outside|(?:larger|greater|bigger) than)"
+                        rf"\s+(?:the\s+)?(?:[\w-]+\s+){{0,3}}{_NOISE}", re.IGNORECASE)
+_WITHIN_NOISE = re.compile(rf"\b(?:within|inside|smaller than|less than|below|under|no larger than|"
+                           rf"not larger than)\s+(?:the\s+)?(?:[\w-]+\s+){{0,3}}{_NOISE}", re.IGNORECASE)
+_OTHER_SUBJECT = re.compile(r"runner[- ]?up|second[- ]best|next best", re.IGNORECASE)
+
+
+def _unnegated(text: str, claim: re.Pattern, subject: re.Pattern | None = None) -> bool:
+    return any(claim.search(c) and not _NEGATED.search(c) and (subject is None or subject.search(c))
+               and not _OTHER_SUBJECT.search(c) for c in _CLAUSE.split(text))
+
+
+def gain_claims(narrative: str, f: dict) -> list[str]:
+    """The narrative's verdict on the gain against the fold spread must match `gain_within_spread`.
+    Silent without a spread (single split)."""
+    within = f.get("gain_within_spread")
+    if within is None:
+        return []
+    if within and _unnegated(narrative, _REAL_GAIN):
+        return ["the gain over the baseline is not larger than the spread across folds "
+                f"(gain_over_spread {f.get('gain_over_spread')}), so do not call it a real, clear or "
+                "meaningful gain or say it exceeds the spread or the noise"]
+    if within is False and _unnegated(narrative, _WITHIN_NOISE, _GAIN_WORD):
+        return ["the gain over the baseline is larger than the spread across folds "
+                f"(gain_over_spread {f.get('gain_over_spread')}), so do not say it is within the noise "
+                "or the spread"]
+    return []
+
+
 def review(narrative: str, f: dict) -> list[str]:
     """Everything wrong with a narrative that can be checked against the facts."""
     found = [f"number {n} does not appear in FACTS" for n in check_numbers(narrative, f)] + \
@@ -456,7 +508,7 @@ def review(narrative: str, f: dict) -> list[str]:
         found.append("the splits have different target rates, so the gap is not evidence of "
                      "overfitting; explain it through the different rates and baselines and compare "
                      "gains over baseline")
-    return found
+    return found + gain_claims(narrative, f)
 
 
 def _write(llm, f: dict) -> tuple[str, str, list[str]]:
@@ -494,6 +546,8 @@ def build(task: Task, journal: Journal, llm=None) -> tuple[str, dict]:
           f"({f['direction']}). Stopped: {f['stop_reason']}.", "",
           "## Summary", "", narrative, "", f"_Narrative source: {source}. {check}_", ""]
     md += splits_md(f)
+    if task.spec.notes:
+        md += ["## Setup notes", ""] + [f"- {n}" for n in task.spec.notes] + [""]
     if best:
         md += [f"## Leaderboard ({f['validation']})", "", leaderboard_md(f), "",
                f"Best experiment code: `nodes/{best['experiment']:03d}/solution.py`", ""]

@@ -96,7 +96,7 @@ def collect(run_dir: Path) -> dict:
         "problem": {"goal": spec.goal, "eval": spec.eval_text, "sources": spec.sources,
                     "primary_table": Path(spec.data_path).name, "target": spec.target,
                     "extra_tables": [Path(p).name for p in spec.extras],
-                    "id_column": spec.id_column, "notes": spec.notes},
+                    "id_column": spec.id_column, "dropped": spec.drop, "notes": spec.notes},
         "task": {"kind": task.kind, "metric": task.metric_name,
                  "greater_is_better": task.metric.greater_is_better, "baseline": task.baseline,
                  "test_baseline": task.test_baseline,

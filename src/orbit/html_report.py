@@ -14,6 +14,18 @@ from .report import no_spread_caveat, split_rows
 W, ROW, PAD_L, PAD_R, PAD_T, PAD_B = 720, 28, 56, 90, 14, 34
 
 
+TITLE_CHARS = 100
+
+
+def short_title(goal: str | None, limit: int = TITLE_CHARS) -> str:
+    """The first sentence of the goal, cut at `limit` characters (with an ellipsis when cut)."""
+    text = " ".join((goal or "").split())
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    if len(first) > limit:
+        return first[:limit].rstrip() + "…"
+    return first
+
+
 def _fmt(x, nd=4):
     return "-" if x is None else f"{x:.{nd}f}"
 
@@ -157,7 +169,8 @@ TEMPLATE = """<!doctype html>
 <title>orbit report: {{ title }}</title><style>{{ css }}</style></head>
 <body><main>
 <h1>{{ title }}</h1>
-<p class="sub">{{ subtitle }}</p>
+{% if goal %}<p class="meta">Problem: {{ goal }}</p>
+{% endif %}<p class="sub">{{ subtitle }}</p>
 <p class="meta">{{ meta }}</p>
 {% if model %}<p class="meta">{% if model.version is not none %}Registered model {% if model.url %}<a href="{{ model.url }}">{{ model.name }}</a>{% else %}{{ model.name }}{% endif %}, version {{ model.version }}{% if model.aliases %}, alias {{ model.aliases | join(', ') }}{% endif %}{% elif model.exported %}Model exported, not registered{% else %}Model export failed{% if model.error %}: {{ model.error }}{% endif %}{% endif %}</p>{% endif %}
 
@@ -207,11 +220,13 @@ def render(data: dict) -> str:
     prob, task, s = data["problem"], data["task"], data["summary"]
     exps = data["experiments"]
     best = s.get("best") or {}
-    title = prob["goal"] or f"Predict {prob['target']}"
+    title = short_title(prob["goal"]) or f"Predict {prob['target']}"
     subtitle = (f"Evaluation: {prob['eval']}" if prob["eval"] else f"Metric: {task['metric']}")
     data_bits = [prob["primary_table"]] + prob["extra_tables"]
     meta = (f"Target {prob['target']} · data {', '.join(data_bits)} · {task['validation']} · "
             f"{s['experiments_run']} experiments · {s['minutes']} min · stopped: {data['stop_reason']}")
+    if prob.get("dropped"):
+        meta += f" · dropped columns: {', '.join(prob['dropped'])}"
     sd = best.get("val_std_across_folds")
     tiles = [
         {"k": f"Best validation {task['metric']}", "v": _fmt(best.get("val_score")),
@@ -241,7 +256,7 @@ def render(data: dict) -> str:
     return _env.from_string(TEMPLATE).render(
         splits=split_rows(s), shift_warning=shift_warning,
         spread_note=no_spread_caveat(s) + "." if s.get("splits") and not s.get("has_spread", True) else "",
-        css=Markup(CSS), title=title, subtitle=subtitle, meta=meta, tiles=tiles,
+        css=Markup(CSS), title=title, goal=" ".join((prob["goal"] or "").split()), subtitle=subtitle, meta=meta, tiles=tiles,
         narrative=narrative_html(data["narrative"]) if data["narrative"] else "", check=data["narrative_check"],
         chart=score_chart(exps, task["baseline"], best_id, task["greater_is_better"], task["metric"]),
         progress=progress_chart(exps, task["greater_is_better"], task["metric"]), folds=task["folds"],

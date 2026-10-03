@@ -60,6 +60,28 @@ its columns. Rows without a usable time value are dropped (noted in `spec.notes`
 column values are written unchanged, and the stratified fold reduction for rare classes is not
 applied. The prompt tells the model that validation and test rows are later than the training rows.
 
+`--time-order` gives the same layout without a column: the order key is the row's position in the
+primary table after rows with a missing target are dropped, so nothing is sorted, no column is added
+to `train.csv`, `test.csv` or the meta file, and the table's own content is untouched. The two
+options are mutually exclusive, `load_labeled` (used by the export) applies the same ordering, and
+the prompt says that validation and test rows come later in the file.
+
+`prepare` also stores `split_stats` in `task.json`: for the training rows (of the last fold, the one
+with the most history), each validation fold and the test split, the row count and the class shares
+(plus the positive share for a binary target) or the mean and standard deviation of the target.
+`test_baseline` is the best-constant score on the test labels, fitted on each fold's training rows
+and averaged like the validation baseline. They are computed from data `prepare` already holds and
+are not written into any sandbox input directory; older `task.json` files without them still load.
+
+Setup also appends notes to `spec.notes` (shown in the setup output and the report): when the
+default became a single split because of the row count; and, only for unordered validation of at
+least 500 rows, a date-like column (name contains date, time, day, month, year or timestamp, or at
+least 95% of a sample of up to 2,000 text values parse as dates; numeric columns need a name with
+date, time or year; constant or two-valued columns and the target are ignored) and drift along the
+file (five blocks of rows in file order; positive share differing by more than a factor of 2, more
+than 0.05 and more than four standard errors, so chance in small blocks stays silent; or block means
+of a numeric target differing by more than one standard deviation of the target).
+
 The helper module is a convenience for the model, not a gate: scripts may ignore it and read the
 CSVs directly. It contains no labels (the meta file lists class names only, never rows or paths).
 `load()` builds numeric feature frames with one text-category mapping shared by the train and test
@@ -213,6 +235,20 @@ experiments ("only one experiment succeeded out of ten") against the run. A narr
 problem goes back to the LLM once with the problems listed; if the revision still fails review,
 the deterministic template is used instead, and the report says which happened. Without an LLM,
 the template produces the same structure.
+
+The facts also hold the per-split rows and target rates, `val_baseline` and `test_baseline`, the
+gains over each (`val_gain`, `test_gain`), `has_spread` (false for a single validation split) and
+`distribution_shift`. Its `flag` compares the test split with the mean over the validation folds,
+and only when every split has at least 30 rows: a binary target's positive share must differ by
+more than a factor of 1.5 and by more than 0.03; for several classes, some class share by more than
+0.10; for a numeric target, the means by more than half the validation standard deviation.
+`folds_differ` applies the same rule between the validation folds, which forward-chaining folds can
+trip by themselves. With the flag set the template and the narrator prompt compare gains over each
+baseline and explain the gap through the different rates; `review` rejects a narrative that calls
+the gap overfitting or leakage (unless it negates that), which goes through the same revise-once,
+then-template path. A single validation split is reported as having no spread. `report.md`, the
+HTML report and `orbit results` show the splits, the test baseline and gain, and a warning when the
+flag is set.
 
 ## Tracking
 

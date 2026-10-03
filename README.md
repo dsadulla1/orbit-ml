@@ -56,7 +56,7 @@ flowchart LR
   steps, wall time and tokens; `--patience` stops a search that has stopped improving.
 - **Honest scores.** The sandbox only gets training data and *unlabeled* rows. Those rows mix
   validation rows (used to rank experiments; by default 5-fold cross-validation on small datasets,
-  forward-chaining folds with `--time-col`) and a test split (scored once, for the final winner).
+  forward-chaining folds with `--time-col` or `--time-order`) and a test split (scored once, for the final winner).
   The generated code cannot see either set of labels, so it cannot overfit or misreport its score.
 - **Isolation.** Each experiment runs in a fresh container: no network, read-only root filesystem,
   all capabilities dropped, CPU/memory/process limits and a timeout. The data is mounted
@@ -97,7 +97,7 @@ Each run writes a folder under `runs/`:
 
 ```
 runs/20261001-120000-breast_cancer/
-  report.md          summary, leaderboard, run stats
+  report.md          summary, splits, leaderboard, run stats
   report.html        the same as one standalone page: charts, leaderboard, best script
   journal.json       every experiment: stage, parent, plan, score, error, tokens
   task.json          metric, baseline, data profile
@@ -150,8 +150,22 @@ the same sources, so you can check what orbit finds before a run.
 are dropped and noted), the latest rows become the test split, and validation rows are always later
 than the rows used for training (one split, or forward-chaining folds that train on everything
 before each validation block). The column stays available to the generated code as a feature.
-`--folds K` sets the number of folds (1 = a single split); datasets above about 10,000 rows use a
-single split by default because every fold costs a sandbox run per experiment.
+If the rows are already in time order but there is no date column, pass `--time-order` instead: the
+file order is the time order, the same layout applies and no column is added (the two options cannot
+be combined). `--folds K` sets the number of folds (1 = a single split); datasets above about
+10,000 rows use a single split by default because every fold costs a sandbox run per experiment,
+and a single split has no spread across folds, so orbit says so in the setup output and the report.
+
+When the data is validated at random, orbit adds non-blocking notes to the setup output and the
+report (files of at least 500 rows only): a column that looks like a date (named like one, or text
+that parses as dates), and a target whose rate or mean changes along the file, both of which mean
+random validation is optimistic for later periods. The report also lists the rows and target rate
+(or mean and standard deviation) of the training rows, the validation folds and the test split, the
+baseline on each, and the gains over them. When the target rate or mean of the test split differs
+clearly from validation (for a binary target: by more than a factor of 1.5 and 0.03; for a
+multiclass target: a class share by more than 0.10; for a numeric target: by more than half a
+standard deviation), the report warns that scores and baselines differ between the two, compares
+gains over each baseline, and does not read the gap as overfitting.
 
 **Metrics.** `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`,
 `f1_macro`, `rmse`, `rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`. By default orbit
@@ -163,7 +177,7 @@ also reports a baseline, the best constant prediction for the metric, as a refer
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--table NAME] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search, write the report, export and register the best model |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--table NAME] [--folds K] [--time-col COL] [--time-order] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search, write the report, export and register the best model |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
@@ -255,8 +269,8 @@ Details are in [docs/DESIGN.md](docs/DESIGN.md) and [docker/README.md](docker/RE
 
 - The quality of the search depends on the LLM. Generated scripts often fail (orbit repairs them
   from their stack traces, but failures use up budget), and small local models fail more.
-- The default validation is random; use `--time-col` when later rows must be predicted from
-  earlier ones. Small datasets give noisy scores: look at the spread across folds.
+- The default validation is random; use `--time-col` (or `--time-order` for a file already in time
+  order) when later rows must be predicted from earlier ones. Small datasets give noisy scores: look at the spread across folds.
 - Cross-validation runs every experiment once per fold, and the time limit applies to each run.
 - orbit targets one labeled table (plus extra tables to join). Several labeled files with the same
   schema are not combined for you.

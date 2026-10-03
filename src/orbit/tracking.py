@@ -68,11 +68,11 @@ def resolve_experiment(explicit: str | None, sources: list[str], name: str | Non
 
 
 def data_fingerprint(task) -> str:
-    """Row count of the primary table (after splitting) and a hash of the file, to tell data versions apart."""
-    import pandas as pd
+    """Number of labeled rows used (the primary table without rows that miss the target) and a hash of
+    the source file, to tell data versions apart."""
+    from .task import load_labeled
 
-    fold = task.fold_dir(1)
-    rows = sum(len(pd.read_csv(fold / f)) for f in ("train.csv", "test.csv"))
+    rows = len(load_labeled(task.spec))
     digest = hashlib.sha256()
     with open(task.spec.data_path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -98,6 +98,8 @@ def _run_tags(task, config) -> dict[str, str]:
         "orbit.target": spec.target, "orbit.metric": task.metric_name,
         "orbit.validation": _validation(task), "orbit.version": _orbit_version(),
     }
+    if spec.drop:
+        tags["orbit.dropped"] = ",".join(spec.drop)[:TAG_LIMIT]
     try:
         tags["orbit.data_fingerprint"] = data_fingerprint(task)
     except Exception as e:  # noqa: BLE001
@@ -108,7 +110,7 @@ def _run_tags(task, config) -> dict[str, str]:
         f"- Data: {tags['orbit.primary_table']}, target `{spec.target}`"
         + (f", extra tables {tags['orbit.extra_tables']}" if tags["orbit.extra_tables"] else ""),
         f"- Validation: {tags['orbit.validation']}",
-    ])
+    ] + ([f"- Dropped columns: {tags['orbit.dropped']}"] if spec.drop else []))
     return {k: str(v)[:TAG_LIMIT] for k, v in tags.items()}
 
 
@@ -187,6 +189,8 @@ class MLflowTracker:
         self.mlflow = mlflow
         self.experiment = experiment
         self.parent = None
+        self.greater_is_better = True
+        self._best_so_far = None   # running best validation score, for the progress curve
         self._tracing = tracing_enabled()
 
     def _tracing_failed(self, error):
@@ -243,6 +247,7 @@ class MLflowTracker:
     @_safe
     def start(self, task, config, llm_model):
         mlflow = self.mlflow
+        self.greater_is_better = task.metric.greater_is_better
         self._set_experiment()
         self._autolog_llm_calls()
         self.parent = self._start_parent(task.run_dir.name)
@@ -290,10 +295,15 @@ class MLflowTracker:
             for name in ARTIFACTS:
                 if (workdir / name).exists():
                     mlflow.log_artifact(str(workdir / name))
-        # Per-step scores on the parent run give a progress curve in the MLflow UI.
+        # Per-step scores on the parent run give a progress curve in the MLflow UI: this experiment's
+        # score and the best one so far (best_val_score, logged at the end, is the final winner).
         if node.metric is not None:
-            mlflow.MlflowClient().log_metric(self.parent.info.run_id, "val_score",
-                                             node.metric, step=node.id)
+            better = max if self.greater_is_better else min
+            self._best_so_far = (node.metric if self._best_so_far is None
+                                 else better(self._best_so_far, node.metric))
+            client, run_id = mlflow.MlflowClient(), self.parent.info.run_id
+            client.log_metric(run_id, "experiment_val_score", node.metric, step=node.id)
+            client.log_metric(run_id, "best_val_score_so_far", self._best_so_far, step=node.id)
 
     @_safe
     def finish(self, task, journal):

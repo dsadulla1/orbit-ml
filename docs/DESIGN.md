@@ -209,7 +209,9 @@ the earlier explanation and error into its first prompt.
 `orbit run` (MLflow tracker, unless `--no-export`) and `orbit export RUN_DIR` call `export_best`
 and then `registry.register_model`; a failed export is a warning, the run's results stay intact.
 `export/registry.json` records the outcome and `results.collect` adds it, with `export.json`, as
-the `model` entry shown by `orbit results` and the HTML report.
+the `model` entry shown by `orbit results` and the HTML report. `orbit export RUN_DIR --reuse`
+skips `export_best`: `export.load_verified_export` checks the recorded size and sha256 of
+`model.pkl` (and `orbit_custom.py`) and hands the files to `register_model` again.
 
 ## Serving
 
@@ -241,9 +243,20 @@ MLflow's scoring server has no authentication, so the port is published as
 `127.0.0.1:PORT:8080` and never on another interface. Containers are named `orbit-serve-<model>-<port>`
 and carry the labels `orbit.serve=1`, `orbit.model` (URI) and `orbit.version`; `--list` and
 `--stop` only consider containers that have both the name prefix and the label, and `orbit predict`
-finds a served model by the same labels. `orbit predict` is a plain `urllib` client: chunks of 500
-rows as `dataframe_records`, NaN as null, a 60 s timeout per request, the server's error message
-shown on failure.
+finds a served model by the same labels, and `--list` computes the uptime from each container's
+`State.StartedAt` (`docker inspect`), not from Docker's rounded text. `orbit predict` is a plain
+`urllib` client: chunks of 500 rows as `dataframe_records`, NaN as null, a 60 s timeout per
+request, the server's error message (at most 300 characters) shown on failure.
+
+Requests are checked by the model itself. The registered signature lists the columns as optional
+and untyped, so MLflow's schema enforcement, whose errors are long, passes everything through;
+`orbit_model.py` then checks the request against `orbit_features.json` (column names, number or
+text, the training categories of text columns; built by `registry.build_features` from the export
+input's `train.csv`) and answers 400 with a short message, or logs unseen categories at WARNING.
+It sets small pandas display options at load time because MLflow prints the request in front of
+every error. `orbit predict` fetches the same file with the MLflow SDK and repeats the checks
+before sending (`serve.check_rows`), so the two stay in step through their tests; a model
+without the file is neither checked by the wrapper nor by the client.
 
 ## Reports and number verification
 

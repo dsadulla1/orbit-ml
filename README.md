@@ -181,10 +181,10 @@ also reports a baseline, the best constant prediction for the metric, as a refer
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
-| `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N] [--hint TEXT]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry; `--hint` gives the LLM extra guidance when an export failed |
+| `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N] [--hint TEXT] [--reuse]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry; `--hint` gives the LLM extra guidance when an export failed; `--reuse` registers the run's existing verified export again (no LLM, no Docker) |
 | `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
 | `orbit serve MODEL [--version N \| --alias NAME] [--port P]`, `orbit serve --list`, `orbit serve --stop NAME\|all` | Serve a registered model (`champion` by default) in a dedicated Docker container on 127.0.0.1 |
-| `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model) |
+| `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns] [--strict]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model); a model name also checks the CSV first, and `--strict` refuses text values not seen in training |
 | `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
 

@@ -61,10 +61,19 @@ After a search with MLflow, `orbit run` exports the best experiment (see
 after the experiment (`orbit export RUN_DIR --model-name NAME` does the same for an existing run).
 The version is logged on the run's parent run as a pyfunc model that takes raw feature rows and
 returns the predicted probability (for probability metrics) or value, with the pickled model, the
-helper module, an input example, a signature that only names the input columns, and the sandbox's
-pinned library versions as its requirements; it needs those versions to load. Version tags record
+helper module, an input example, a signature that only names the input columns (all optional, so
+the model's own checks, below, answer requests with a missing column), the features file, and the
+sandbox's pinned library versions as its requirements; it needs those versions to load. Version tags record
 the run, experiment, metric, validation and test scores, baseline, goal, validation scheme and data
 fingerprint.
+
+The features file, `artifacts/orbit_features.json`, lists every feature column in order with its
+type (`number` or `text`; booleans count as text) and, for a text column, its distinct values in the
+training data (at most 500; beyond that `categories` is null and `truncated` is true). The serving
+wrapper uses it to check requests, and `orbit predict` fetches it to check a CSV before sending it.
+It holds the column names and the category values of your data, so anyone who can read the model
+can read them; it contains no rows. A model registered before this file existed has none and is
+served without these checks.
 
 When the pipeline needs its own classes or functions, they travel in one module, `orbit_custom.py`,
 which export checked statically and ships as code in the model's `code/` folder. Such a version has
@@ -87,6 +96,14 @@ prompt, reply, script and stderr of each attempt. Retry with extra guidance, for
 `orbit export RUN_DIR --hint "Move the feature code into orbit_custom.py"` (at most 1000
 characters); the first prompt of the retry also includes how the previous export failed.
 
+`orbit export RUN_DIR --reuse` skips the LLM and Docker: when `export/export.json` says the export
+worked and `model.pkl`, `sample_input.csv`, `sample_predictions.csv` (and `orbit_custom.py`, when
+the model has one) are still the files it describes (size and sha256), it registers them again as a
+new version, with the usual tags and the usual champion rule (`--model-name`, `--force-champion`
+work as before). Use it after a registry problem, to register under another model name, or after
+upgrading orbit, so that the new version carries what newer models carry (the features file). With
+no verified export it says so and asks you to run without `--reuse`.
+
 ## Serving a model
 
 Build the serving image once (it extends the sandbox image, so build that first):
@@ -105,8 +122,25 @@ uv run orbit serve my-model --port 8099
 orbit checks that the model exists, starts the container, waits until it answers and prints the
 endpoint, the container name and a `curl` command built from the model's saved input example. The
 request body is `{"dataframe_records": [{...raw feature columns...}]}` and the response is
-`{"predictions": [{"prediction": 55.47}]}`. Columns that are not features (the target, `orbit_id`,
-anything else) are ignored; a missing feature column is a 400 with the column's name.
+`{"predictions": [{"prediction": 55.47}]}`. Errors end with a short message after MLflow's own
+prefix (`Failed to predict data '...'. Error: <message>`); `orbit predict` shows only the message.
+
+| Request | Response |
+| --- | --- |
+| A feature column is missing | 400: `Missing feature column(s): a, b (2 of 19). Send every feature column; columns not needed (the target, orbit_id) are ignored.` (at most 10 names, then "and N more") |
+| Text in a numeric column (`"fifty"` in `age`) | 400: `Column 'age' must be a number; row 2 has 'fifty'.` (row 1 is the first record; numbers written as text, `"nan"` and `""` are accepted, the last two as missing) |
+| A category not seen in training | Scored as the model's pipeline treats any unknown value; one line per request in `docker logs`: `scored 1 value(s) not seen in training: job: astronaut (1 row)` |
+| A missing value (`null`) | Scored; the model's pipeline handles it as it did in training |
+| An extra column (the target, `orbit_id`, anything else) | Ignored |
+| `{"dataframe_records": []}` | 400: `No rows to score: send at least one record.` |
+| Malformed JSON | 400 from MLflow: `Invalid input. Ensure that input is a valid JSON formatted string.` |
+| A content type other than JSON, CSV or Parquet | 415 from MLflow, listing the types it accepts |
+| A very large request | No limit of its own: one request of 60,000 records (23 MB of JSON, the bank-marketing model with 19 columns, a local container) was scored in 3.6 seconds; `orbit predict` sends 500 rows at a time |
+
+A request is never changed silently, with one exception: a category the model has not seen is
+scored, because a pipeline's own handling of unknown values is part of the model. Use
+`orbit predict --strict` to refuse such rows. Models registered before the features file existed
+keep MLflow's own behaviour (a long 400 for a missing column, no other checks).
 
 ```bash
 uv run orbit predict my-model new_rows.csv --out scored.csv   # or an http://127.0.0.1:PORT URL
@@ -115,7 +149,13 @@ uv run orbit serve --stop all                                # stop and remove t
 ```
 
 `orbit predict` sends the rows in chunks of 500 and writes the `prediction` column in the input's
-order (`--keep-columns` repeats the input columns first).
+order (`--keep-columns` repeats the input columns first). Given a model name (or a `models:/` URI of
+a served model) it first checks the CSV against the model's features file: an empty file, a missing
+feature column or text in a numeric column stops it before anything is sent, with the same message
+the server gives and the CSV's row number (the first data row is 1). Unseen categories and missing
+values are scored and counted in the one-line summary, together with the extra columns that were
+ignored; `--strict` stops on unseen categories too (showing up to 5 examples). With a plain URL the
+server does the checking. `orbit serve --list` shows each container's uptime from its start time.
 
 The container runs `mlflow models serve` with the sandbox's pinned libraries, so the model loads
 exactly as it was fitted. It downloads the model from the tracking server over the Compose network

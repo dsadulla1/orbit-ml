@@ -59,3 +59,18 @@ def test_explore_folder_xlsx_and_failures(tmp_path):
 def test_run_rejects_empty_experiment(clf_csv):
     result = runner.invoke(app, ["run", str(clf_csv), "-t", "label", "--experiment", "  "])
     assert result.exit_code != 0 and "empty" in result.output
+
+
+def test_explore_table_option(tmp_path):
+    import pandas as pd
+
+    for name, n in (("v1.csv", 50), ("v2.csv", 30)):
+        pd.DataFrame({"a": range(n), "y": [0, 1] * (n // 2)}).to_csv(tmp_path / name, index=False)
+    both = [str(tmp_path / "v1.csv"), str(tmp_path / "v2.csv")]
+    default = runner.invoke(app, ["explore", *both, "-t", "y"])
+    assert default.exit_code == 0 and "profiling v1.csv" in default.output.replace("\n", " ")
+    chosen = runner.invoke(app, ["explore", *both, "-t", "y", "--table", "v2"])
+    assert chosen.exit_code == 0 and "### v2.csv (profile of all 30 rows)" in chosen.output
+    bad = runner.invoke(app, ["explore", *both, "-t", "y", "--table", "zzz"])
+    assert bad.exit_code == 1 and "matches none of the tables" in bad.output
+    assert "--table" in runner.invoke(app, ["run", "--help"]).output

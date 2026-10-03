@@ -40,6 +40,8 @@ def explore(
                                                "http(s) URLs, as for `orbit run`"),
     target: str = typer.Option(None, "--target", "-t", help="Column to profile as the target"),
     goal: str = typer.Option(None, help="Accepted for symmetry with `run`; explore makes no LLM call"),
+    table: str = typer.Option(None, "--table", help="Profile this table (file name or part of it) when "
+                                                    "several tables hold the target"),
 ):
     """Show the tables and documents found in the sources and the data profile the agent sees.
 
@@ -50,7 +52,7 @@ def explore(
     """
     import tempfile
 
-    from .planner import describe_table, format_note, load_for_profile
+    from .planner import PlanError, describe_table, format_note, load_for_profile, match_table
     from .sources import SourceError, resolve
 
     with tempfile.TemporaryDirectory(prefix="orbit-explore-") as tmp:
@@ -74,6 +76,16 @@ def explore(
                 for p, df in frames.items():
                     console.print(f"  {escape(p.name)}: {escape(', '.join(map(str, df.columns)))}")
                 raise typer.Exit(1)
+            if table:
+                try:
+                    wanted = match_table(table, [p.name for p in frames])
+                except PlanError as e:
+                    console.print(f"[red]{escape(str(e))}[/]")
+                    raise typer.Exit(1)
+                holders = [p for p in holders if p.name == wanted]
+                if not holders:
+                    console.print(f"[red]--table {escape(wanted)} has no column {escape(repr(target))}.[/]")
+                    raise typer.Exit(1)
             primary = max(holders, key=lambda p: ("train" in p.name.lower(), loaded[p][1]))
             if len(holders) > 1:
                 sizes = ", ".join(f"{p.name}: {loaded[p][1]:,} rows" for p in holders)
@@ -107,6 +119,8 @@ def run(
     minutes: float = typer.Option(60, help="Time budget for the whole search"),
     tokens: int = typer.Option(None, help="Optional LLM token budget"),
     drafts: int = typer.Option(3, help="Independent initial solutions before refining"),
+    table: str = typer.Option(None, "--table", help="File name (or part of it) of the table to learn from "
+                                                    "when several tables hold the target"),
     folds: int = typer.Option(None, help="Cross-validation folds (default: 5 for small data, "
                                           "otherwise 1 = a single validation split)"),
     time_col: str = typer.Option(None, "--time-col",
@@ -157,7 +171,7 @@ def run(
     run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
     try:
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
-                          seed=seed, llm=llm, within=out, time_col=time_col)
+                          seed=seed, llm=llm, within=out, time_col=time_col, table=table)
     except (SourceError, PlanError, ValueError) as e:
         console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)

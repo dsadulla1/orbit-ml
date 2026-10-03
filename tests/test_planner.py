@@ -106,3 +106,51 @@ def test_non_string_fields_are_retried_not_crashed(house, bad):
 
 def test_id_column_equal_to_target_is_dropped(house):
     assert plan(house["tables"], [], goal="price", llm=ScriptedLLM([_j(id_column="SalePrice")])).id_column is None
+
+
+def _versions(tmp_path):
+    """Three tables that all hold the target `y`, like the several versions of one dataset."""
+    for name, n in (("bank-full.csv", 60), ("bank-sample.csv", 20), ("bank-extra-full.csv", 45)):
+        pd.DataFrame({"a": range(n), "y": [i % 2 for i in range(n)]}).to_csv(tmp_path / name, index=False)
+    return sorted(tmp_path.glob("*.csv"))
+
+
+def test_match_table_rules():
+    from orbit.planner import match_table
+
+    names = ["bank-full.csv", "bank-sample.csv", "Bank-Extra-full.csv"]
+    assert match_table("bank-full.csv", names) == "bank-full.csv"
+    assert match_table("BANK-SAMPLE.CSV", names) == "bank-sample.csv"
+    assert match_table("sample", names) == "bank-sample.csv"
+    assert match_table("extra", names) == "Bank-Extra-full.csv"
+    with pytest.raises(PlanError, match="matches none of the tables: bank-full.csv"):
+        match_table("nope", names)
+    with pytest.raises(PlanError, match="matches several tables .*give the full file name"):
+        match_table("full", names)
+
+
+def test_table_choice_overrides_the_tiebreak_and_says_so(tmp_path):
+    tables = _versions(tmp_path)
+    default = plan(tables, [], target="y")
+    assert default.primary.name == "bank-full.csv"          # most rows
+    chosen = plan(tables, [], target="y", table="sample")
+    assert chosen.primary.name == "bank-sample.csv"
+    note = next(n for n in chosen.notes if "tables have column" in n)
+    assert "using bank-sample.csv" in note and "chosen with --table" in note and "bank-full.csv (60 rows)" in note
+
+
+def test_table_choice_wins_over_the_llm(tmp_path):
+    tables = _versions(tmp_path)
+    llm = ScriptedLLM([_j(primary_table="bank-full.csv", target="y", id_column=None)])
+    p = plan(tables, [], goal="subscribe", llm=llm, table="bank-extra")
+    assert p.primary.name == "bank-extra-full.csv" and p.target == "y"
+    assert "primary table: bank-extra-full.csv" in llm.prompts[0]
+
+
+def test_table_choice_errors_are_readable(tmp_path):
+    tables = _versions(tmp_path)
+    with pytest.raises(PlanError, match="matches none of the tables"):
+        plan(tables, [], target="y", table="zzz")
+    pd.DataFrame({"a": [1, 2, 3]}).to_csv(tmp_path / "other.csv", index=False)
+    with pytest.raises(PlanError, match="has no column 'y'; its columns: a"):
+        plan(sorted(tmp_path.glob("*.csv")), [], target="y", table="other")

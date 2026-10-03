@@ -295,8 +295,10 @@ def _check(proposal: dict, frames: dict[str, pd.DataFrame], target, metric, eval
             "reasoning": str(proposal.get("reasoning") or "")[:300]}
 
 
-def _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes) -> dict:
+def _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes, primary=None) -> dict:
     fixed = []
+    if primary:
+        fixed.append(f"primary table: {primary}")
     if target:
         fixed.append(f"target column: {target}")
     if metric:
@@ -313,15 +315,35 @@ def _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes) -> di
     for _ in range(2):
         text = llm.complete(SYSTEM, prompt + (f"\n\nYour previous reply was rejected: {error}" if error else "")).text
         try:
-            return _check(_parse_json(text), frames, target, metric, eval_text)
+            proposal = _parse_json(text)
+            if primary:
+                proposal["primary_table"] = primary  # decided by the user
+            return _check(proposal, frames, target, metric, eval_text)
         except PlanError as e:
             error = str(e)
     raise PlanError(f"could not work out the task from the data ({error}); "
                     "pass --target (and --metric) explicitly")
 
 
+def match_table(table: str, names: list[str]) -> str:
+    """The table a user asked for by (part of) its file name: an exact name, else a name that
+    matches ignoring case, else the only name containing the text."""
+    if table in names:
+        return table
+    lowered = [n for n in names if n.lower() == table.lower()]
+    if len(lowered) == 1:
+        return lowered[0]
+    partial = [n for n in names if table.lower() in n.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise PlanError(f"--table {table!r} matches none of the tables: {', '.join(names)}")
+    raise PlanError(f"--table {table!r} matches several tables ({', '.join(partial)}); "
+                    "give the full file name")
+
+
 def plan(tables: list[Path], docs: list[Path], goal: str | None = None, eval_text: str | None = None,
-         target: str | None = None, metric: str | None = None, llm=None) -> Plan:
+         target: str | None = None, metric: str | None = None, llm=None, table: str | None = None) -> Plan:
     if metric is not None:
         metric = match_metric(metric) or metric
         if metric not in METRICS:
@@ -336,12 +358,17 @@ def plan(tables: list[Path], docs: list[Path], goal: str | None = None, eval_tex
     frames = {n: df for n, (df, _, _) in loaded.items()}
     sizes = {n: (total, sampled) for n, (_, total, sampled) in loaded.items()}
 
-    holders = [n for n, f in frames.items() if target and target in f.columns]
+    chosen = match_table(table, list(paths)) if table else None
+    if chosen and target and target not in frames[chosen].columns:
+        raise PlanError(f"--table {chosen} has no column {target!r}; its columns: "
+                        f"{', '.join(map(str, frames[chosen].columns))}")
+    holders = [n for n, f in frames.items() if target and target in f.columns and chosen in (None, n)]
     needs_llm = target is None or len(holders) != 1 or (metric is None and eval_text)
     notes = []
     if needs_llm and llm is not None:
-        choice = _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes)
-        why = f"chosen by the planner: {choice['reasoning']}" if choice["reasoning"] else "chosen by the planner"
+        choice = _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes, chosen)
+        why = ("chosen with --table" if chosen else
+               f"chosen by the planner: {choice['reasoning']}" if choice["reasoning"] else "chosen by the planner")
     elif target is None:
         raise PlanError("no --target given and no LLM available to infer it")
     elif not holders:
@@ -349,7 +376,8 @@ def plan(tables: list[Path], docs: list[Path], goal: str | None = None, eval_tex
                         f"({'; '.join(f'{n}: {list(f.columns)[:8]}' for n, f in frames.items())})")
     else:
         pick = max(holders, key=lambda n: ("train" in n.lower(), sizes[n][0]))
-        why = ("the largest of the tables named like 'train'" if "train" in pick.lower()
+        why = ("chosen with --table" if chosen else
+               "the largest of the tables named like 'train'" if "train" in pick.lower()
                else "the table with the most rows")
         choice = {"primary": pick, "target": target, "metric": metric, "id_column": None}
     choice["metric"] = choice["metric"] or metric

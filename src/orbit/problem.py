@@ -23,13 +23,14 @@ def run_name(sources: list[str]) -> str:
 
 def setup_task(sources: list[str], run_dir: Path, goal: str | None = None, eval_text: str | None = None,
                target: str | None = None, folds: int | None = None, seed: int = 42, llm=None,
-               within: Path | None = None, time_col: str | None = None) -> Task:
+               within: Path | None = None, time_col: str | None = None,
+               table: str | None = None) -> Task:
     """Raises SourceError or PlanError with a message meant for the user. If setup fails and
     `run_dir` did not exist before the call, the folder this call created is removed again (only
     if it lies inside `within`, when given)."""
     existed = run_dir.exists()
     try:
-        return _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col)
+        return _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col, table)
     except Exception:
         if not existed:
             _remove_created(run_dir, within)
@@ -46,11 +47,11 @@ def _remove_created(run_dir: Path, within: Path | None = None) -> None:
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col) -> Task:
+def _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col, table=None) -> Task:
     resolved = resolve(sources, run_dir / "source")
     named = _is_metric_name(eval_text)  # a bare metric name is a decision; anything else is wording
     p = plan(resolved.tables, resolved.docs, goal=goal, eval_text=None if named else eval_text,
-             target=target, metric=eval_text if named else None, llm=llm)
+             target=target, metric=eval_text if named else None, llm=llm, table=table)
     used = [p.primary, *p.extras]
     formats = [n for n in map(format_note, used) if n]
     spec = TaskSpec(str(p.primary), p.target, p.metric, goal, folds=folds, seed=seed,

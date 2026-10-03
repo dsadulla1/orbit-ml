@@ -132,7 +132,9 @@ the same sources, so you can check what orbit finds before a run.
 - `--goal` states the problem in plain language and `--eval` says how to judge it, as a metric
   name or in words ("RMSE between log prices").
 - Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
-  answer against the files.
+  answer against the files. When several tables hold the target (several versions of one dataset, for
+  example) the setup output says which was used and why; pick another with `--table NAME` (a file
+  name or part of it), for `explore` as well as `run`.
 - Tables that don't hold the target are available to the generated code under `data/extra/`
   (read-only), so they can be joined in. A table that contains the target column is ignored,
   because the generated code could read the labels from it (combine such files into the training
@@ -161,7 +163,7 @@ also reports a baseline, the best constant prediction for the metric, as a refer
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search, write the report, export and register the best model |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--table NAME] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search, write the report, export and register the best model |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |

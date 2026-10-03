@@ -7,16 +7,28 @@ proposes it as a JSON block (plain text, no tool calling) and orbit validates ev
 against the real files and the metric registry before using it. Metrics are always chosen from
 `METRICS`: orbit never executes generated scoring code on the host.
 """
+import codecs
+import csv
+import functools
+import gzip
+import io
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .metrics import METRICS, match_metric
 
-PROFILE_ROWS = 20_000
+PROFILE_ROWS = 100_000  # tables with more rows are profiled on a random sample of this size
+SNIFF_BYTES = 64 * 1024
+SNIFF_LINES = 50
+DELIMITERS = ",;\t|"
+ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")  # latin-1 decodes any byte, so it is the last resort
+_DECIMAL_COMMA = re.compile(r"^\s*-?\d+,\d+\s*$")
+_DECIMAL_POINT = re.compile(r"^\s*-?\d+\.\d+\s*$")
 DOC_CHARS = 3_000
 DOCS_TOTAL_CHARS = 8_000
 
@@ -65,14 +77,171 @@ class Plan:
     notes: list[str] = field(default_factory=list)
 
 
-def read_table(path: Path, nrows: int | None = None) -> pd.DataFrame:
-    sep = "\t" if ".tsv" in path.name.lower() else ","
-    return pd.read_csv(path, sep=sep, nrows=nrows)
+def _open_bytes(path: Path):
+    return gzip.open(path, "rb") if path.name.lower().endswith(".gz") else open(path, "rb")
 
 
-def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40, title: str | None = None) -> str:
-    lines = [f"### {title or path.name}  ({len(df):,}{'+' if len(df) >= PROFILE_ROWS else ''} rows, "
-             f"{df.shape[1]} columns)", "column | dtype | missing% | example values"]
+def _detect_encoding(path: Path) -> str:
+    """The first of `ENCODINGS` that decodes the whole file (streamed, so a BOM or a stray Latin-1
+    byte late in the file is noticed)."""
+    for enc in ENCODINGS[:-1]:
+        dec = codecs.getincrementaldecoder(enc)()
+        try:
+            with _open_bytes(path) as f:
+                while chunk := f.read(1 << 20):
+                    dec.decode(chunk)
+                dec.decode(b"", final=True)
+            return enc
+        except UnicodeDecodeError:
+            continue
+        except (OSError, EOFError) as e:
+            raise ValueError(f"{path.name}: could not read the file ({e})") from e
+    return ENCODINGS[-1]
+
+
+def _consistent_fields(text: str, delim: str) -> int | None:
+    """Field count shared by all of the first records (quotes respected), or None."""
+    counts = []
+    try:
+        for row in csv.reader(io.StringIO(text, newline=""), delimiter=delim):
+            counts.append(len(row))
+            if len(counts) >= SNIFF_LINES:
+                break
+    except csv.Error:
+        return None
+    return counts[0] if counts and len(set(counts)) == 1 and counts[0] > 1 else None
+
+
+def _sniff_delimiter(text: str) -> str:
+    try:
+        guess = csv.Sniffer().sniff(text, delimiters=DELIMITERS).delimiter
+    except csv.Error:
+        guess = None
+    if guess and _consistent_fields(text, guess):
+        return guess
+    fields = {d: _consistent_fields(text, d) for d in DELIMITERS}
+    best = [d for d in DELIMITERS if fields[d]]
+    return max(best, key=lambda d: fields[d]) if best else ","
+
+
+def _decimal_comma(path: Path, delim: str, enc: str) -> bool:
+    """True when a text column is almost all numbers written like 3,14 and none like 3.14."""
+    try:
+        sample = pd.read_csv(path, sep=delim, encoding=enc, nrows=2000, dtype=str)
+    except (ValueError, OSError):
+        return False
+    for c in sample.columns:
+        vals = sample[c].dropna().astype(str)
+        if len(vals) and not vals.str.match(_DECIMAL_POINT).any() \
+                and vals.str.match(_DECIMAL_COMMA).mean() >= 0.9:
+            return True
+    return False
+
+
+@functools.lru_cache(maxsize=64)
+def _format(path: str, mtime: int, size: int) -> tuple:
+    p = Path(path)
+    enc = _detect_encoding(p)
+    with _open_bytes(p) as f:
+        raw = f.read(SNIFF_BYTES)
+    text = raw.decode(enc, errors="replace")
+    if len(raw) >= SNIFF_BYTES and "\n" in text:
+        text = text[:text.rindex("\n") + 1]  # drop the record cut off by the read limit
+    if ".tsv" in p.name.lower():
+        delim = "\t"
+    else:
+        delim = _sniff_delimiter(text)
+    decimal = "," if delim != "," and _decimal_comma(p, delim, enc) else "."
+    return delim, enc, decimal
+
+
+def describe_format(path: Path) -> dict:
+    """How a table file is written: `delimiter`, `encoding` and `decimal` mark. `.tsv` files are
+    always tab separated; other files are sniffed from their first 64 KB."""
+    path = Path(path)
+    st = path.stat()
+    delim, enc, decimal = _format(str(path.resolve()), st.st_mtime_ns, st.st_size)
+    return {"delimiter": delim, "encoding": enc, "decimal": decimal}
+
+
+def format_note(path: Path) -> str | None:
+    """A sentence when the file is not plain comma / UTF-8 / dot-decimal, else None."""
+    fmt = describe_format(path)
+    parts = []
+    if fmt["delimiter"] != ",":
+        parts.append(f"delimiter {fmt['delimiter']!r}")
+    if fmt["decimal"] != ".":
+        parts.append(f"decimal mark {fmt['decimal']!r}")
+    if not fmt["encoding"].startswith("utf-8"):
+        parts.append(f"{fmt['encoding']} encoding")
+    return f"read {Path(path).name} with {', '.join(parts)}" if parts else None
+
+
+def _check_columns(path: Path, df: pd.DataFrame) -> None:
+    if df.shape[1] == 1:
+        header = str(df.columns[0])
+        seen = [d for d in DELIMITERS if header.count(d) >= 2]
+        if seen:
+            chars = ", ".join(repr(d) for d in seen)
+            raise ValueError(f"{path.name}: could not split the header into columns (the single column "
+                             f"{header[:80]!r} contains {chars} repeatedly); check that the file is a "
+                             "consistently delimited table (comma, semicolon, tab or pipe)")
+
+
+def read_table(path: Path, nrows: int | None = None, *, skiprows=None) -> pd.DataFrame:
+    """Read a CSV/TSV table (optionally gzipped) whatever its delimiter, encoding or decimal mark."""
+    path = Path(path)
+    fmt = describe_format(path)
+    encodings = [fmt["encoding"]] + [e for e in ENCODINGS if e != fmt["encoding"]]
+    for enc in encodings:
+        try:
+            df = pd.read_csv(path, sep=fmt["delimiter"], encoding=enc, decimal=fmt["decimal"],
+                             nrows=nrows, skiprows=skiprows)
+            break
+        except UnicodeDecodeError:
+            continue
+        except pd.errors.EmptyDataError as e:
+            raise ValueError(f"{path.name}: the file is empty") from e
+    else:  # pragma: no cover - latin-1 decodes every byte
+        raise ValueError(f"{path.name}: could not decode the file as text (tried {', '.join(encodings)})")
+    _check_columns(path, df)
+    return df
+
+
+def _count_data_rows(path: Path) -> int:
+    """Lines after the header, counted without parsing. Quoted fields that contain line breaks make
+    this an overestimate, which only matters for files above the sampling threshold."""
+    n, last = 0, b"\n"
+    with _open_bytes(path) as f:
+        while chunk := f.read(1 << 22):
+            n += chunk.count(b"\n")
+            last = chunk[-1:]
+    return max(0, n + (last != b"\n") - 1)
+
+
+def load_for_profile(path: Path, max_rows: int | None = None, seed: int = 0) -> tuple[pd.DataFrame, int, bool]:
+    """The table for profiling, its total row count and whether it is a sample. Up to `max_rows`
+    rows are read in full; a larger table is sampled at random (seeded, original order kept),
+    never taken from the top, because files are often ordered by date or class."""
+    path = Path(path)
+    max_rows = PROFILE_ROWS if max_rows is None else max_rows
+    total = _count_data_rows(path)
+    if total <= max_rows:
+        df = read_table(path)
+        return df, len(df), False
+    keep = np.zeros(total, dtype=bool)
+    keep[np.random.default_rng(seed).choice(total, size=max_rows, replace=False)] = True
+    df = read_table(path, skiprows=lambda i: i > 0 and (i > total or not keep[i - 1]))
+    return df, total, True
+
+
+def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40, title: str | None = None,
+                   total_rows: int | None = None, sampled: bool = False) -> str:
+    shown = f"{len(df):,}"
+    if sampled and total_rows:
+        shown = f"random sample of {len(df):,} of {total_rows:,}"
+    lines = [f"### {title or path.name} ({shown} rows, {df.shape[1]} columns)",
+             "column | dtype | missing% | example values"]
     for c in list(df.columns)[:max_cols]:
         s = df[c]
         ex = ", ".join(map(str, s.dropna().unique()[:3]))[:60]
@@ -126,7 +295,7 @@ def _check(proposal: dict, frames: dict[str, pd.DataFrame], target, metric, eval
             "reasoning": str(proposal.get("reasoning") or "")[:300]}
 
 
-def _ask(llm, goal, eval_text, frames, paths, docs, target, metric) -> dict:
+def _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes) -> dict:
     fixed = []
     if target:
         fixed.append(f"target column: {target}")
@@ -136,7 +305,8 @@ def _ask(llm, goal, eval_text, frames, paths, docs, target, metric) -> dict:
         goal=goal or "(not given: infer a sensible prediction task from the data)",
         eval=eval_text or "(not given)",
         metrics=", ".join(sorted(METRICS)),
-        tables="\n\n".join(describe_table(paths[n], f) for n, f in frames.items()),
+        tables="\n\n".join(describe_table(paths[n], f, total_rows=sizes[n][0], sampled=sizes[n][1])
+                          for n, f in frames.items()),
         docs=(f"\n## Documentation\n{read_docs(docs)}\n" if docs else ""),
         fixed="\n".join(fixed) or "(nothing)")
     error = None
@@ -162,26 +332,35 @@ def plan(tables: list[Path], docs: list[Path], goal: str | None = None, eval_tex
     paths = {p.name: p for p in tables}
     if len(paths) != len(tables):
         raise PlanError("two tables share a file name; rename one so they can be told apart")
-    frames = {n: read_table(p, PROFILE_ROWS) for n, p in paths.items()}
+    loaded = {n: load_for_profile(p) for n, p in paths.items()}
+    frames = {n: df for n, (df, _, _) in loaded.items()}
+    sizes = {n: (total, sampled) for n, (_, total, sampled) in loaded.items()}
 
     holders = [n for n, f in frames.items() if target and target in f.columns]
     needs_llm = target is None or len(holders) != 1 or (metric is None and eval_text)
     notes = []
     if needs_llm and llm is not None:
-        choice = _ask(llm, goal, eval_text, frames, paths, docs, target, metric)
-        if choice["reasoning"]:
-            notes.append(f"setup: {choice['reasoning']}")
+        choice = _ask(llm, goal, eval_text, frames, paths, docs, target, metric, sizes)
+        why = f"chosen by the planner: {choice['reasoning']}" if choice["reasoning"] else "chosen by the planner"
     elif target is None:
         raise PlanError("no --target given and no LLM available to infer it")
     elif not holders:
         raise PlanError(f"target {target!r} is not a column of any table "
                         f"({'; '.join(f'{n}: {list(f.columns)[:8]}' for n, f in frames.items())})")
     else:
-        pick = max(holders, key=lambda n: ("train" in n.lower(), len(frames[n])))
-        if len(holders) > 1:
-            notes.append(f"setup: {len(holders)} tables have column {target!r}; using {pick}")
+        pick = max(holders, key=lambda n: ("train" in n.lower(), sizes[n][0]))
+        why = ("the largest of the tables named like 'train'" if "train" in pick.lower()
+               else "the table with the most rows")
         choice = {"primary": pick, "target": target, "metric": metric, "id_column": None}
     choice["metric"] = choice["metric"] or metric
+    candidates = [n for n, f in frames.items() if choice["target"] in f.columns]
+    if len(candidates) > 1:
+        others = ", ".join(f"{n} ({sizes[n][0]:,} rows)" for n in candidates if n != choice["primary"])
+        notes.append(f"setup: {len(candidates)} tables have column {choice['target']!r}; using "
+                     f"{choice['primary']} ({sizes[choice['primary']][0]:,} rows), {why}; "
+                     f"other candidates: {others}")
+    elif choice.get("reasoning"):
+        notes.append(f"setup: {choice['reasoning']}")
     if eval_text and choice["metric"] is None and not match_metric(eval_text):
         raise PlanError(f"cannot map the evaluation {eval_text!r} to a supported metric "
                         f"({', '.join(sorted(METRICS))}); pass --metric")

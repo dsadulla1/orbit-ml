@@ -4,7 +4,7 @@ import shutil
 import urllib.parse
 from pathlib import Path
 
-from .planner import plan
+from .planner import format_note, plan
 from .sources import resolve
 from .task import Task, TaskSpec, prepare
 
@@ -51,10 +51,12 @@ def _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col
     named = _is_metric_name(eval_text)  # a bare metric name is a decision; anything else is wording
     p = plan(resolved.tables, resolved.docs, goal=goal, eval_text=None if named else eval_text,
              target=target, metric=eval_text if named else None, llm=llm)
+    used = [p.primary, *p.extras]
+    formats = [n for n in map(format_note, used) if n]
     spec = TaskSpec(str(p.primary), p.target, p.metric, goal, folds=folds, seed=seed,
                     sources=list(sources), eval_text=eval_text, extras=[str(x) for x in p.extras],
                     docs=[str(x) for x in p.docs], id_column=p.id_column,
-                    notes=resolved.notes + p.notes, time_col=time_col)
+                    notes=resolved.notes + formats + p.notes, time_col=time_col)
     return prepare(spec, run_dir)
 
 

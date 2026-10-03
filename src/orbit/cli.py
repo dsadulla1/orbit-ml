@@ -11,7 +11,6 @@ from rich.table import Table
 from . import report as report_mod
 from .agent import Agent, Journal, SearchConfig
 from .config import LLMSettings, SandboxSettings, load_dotenv, tracker_choice
-from .planner import PROFILE_ROWS
 from .task import Task, TaskSpec, prepare, profile
 
 app = typer.Typer(help="Autonomous ML experiments: an LLM proposes, a sandbox runs, orbit scores.",
@@ -51,21 +50,23 @@ def explore(
     """
     import tempfile
 
-    from .planner import describe_table, read_table
+    from .planner import describe_table, format_note, load_for_profile
     from .sources import SourceError, resolve
 
     with tempfile.TemporaryDirectory(prefix="orbit-explore-") as tmp:
         try:
             found = resolve(data, Path(tmp) / "source")
-            frames = {p: read_table(p, nrows=PROFILE_ROWS) for p in found.tables}
+            loaded = {p: load_for_profile(p) for p in found.tables}
+            notes = found.notes + [n for n in map(format_note, found.tables) if n]
         except (SourceError, ValueError, OSError) as e:
             console.print(f"[red]Could not read the data:[/] {escape(str(e))}")
             raise typer.Exit(1)
         console.print(f"Tables: {escape(', '.join(p.name for p in found.tables))}")
         if found.docs:
             console.print(f"Documents: {escape(', '.join(p.name for p in found.docs))}")
-        for note in found.notes:
+        for note in notes:
             console.print(f"[dim]{escape(note)}[/]")
+        frames = {p: df for p, (df, _, _) in loaded.items()}
         if target:
             holders = [p for p, df in frames.items() if target in df.columns]
             if not holders:
@@ -73,14 +74,20 @@ def explore(
                 for p, df in frames.items():
                     console.print(f"  {escape(p.name)}: {escape(', '.join(map(str, df.columns)))}")
                 raise typer.Exit(1)
-            primary = holders[0]
-        for p, df in frames.items():
+            primary = max(holders, key=lambda p: ("train" in p.name.lower(), loaded[p][1]))
+            if len(holders) > 1:
+                sizes = ", ".join(f"{p.name}: {loaded[p][1]:,} rows" for p in holders)
+                console.print(f"[dim]{len(holders)} tables have column {escape(repr(target))} "
+                              f"({escape(sizes)}); profiling {escape(primary.name)}[/]")
+        for p, (df, total, sampled) in loaded.items():
             console.print()
             if target and p == primary:
-                console.print(escape(f"### {p.name}"))
+                basis = (f"a random sample of {len(df):,} of {total:,} rows" if sampled
+                         else f"all {total:,} rows")
+                console.print(escape(f"### {p.name} (profile of {basis})"))
                 console.print(escape(profile(df, target)))
             else:
-                console.print(escape(describe_table(p, df)))
+                console.print(escape(describe_table(p, df, total_rows=total, sampled=sampled)))
 
 
 @app.command()

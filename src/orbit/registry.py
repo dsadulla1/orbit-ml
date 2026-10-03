@@ -10,6 +10,7 @@ Nothing in this module raises for MLflow problems: they come back in `RegistryRe
 """
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import warnings
@@ -26,6 +27,8 @@ log = logging.getLogger("orbit")
 
 CHAMPION = "champion"
 REGISTRY_FILE = "registry.json"
+FEATURES_FILE = "orbit_features.json"
+MAX_CATEGORIES = 500   # distinct values of a text column kept in the features file
 
 # The libraries the model was fitted with, as pinned for the sandbox in
 # docker/sandbox-requirements.txt (the sandbox installs xgboost-cpu, which is `import xgboost`).
@@ -152,17 +155,44 @@ def _description(data: dict, tags: dict, custom: Path | None = None) -> str:
     return "\n".join(lines)
 
 
+def build_features(input_dir: Path) -> dict:
+    """What the model takes, from the export input's train.csv: for every feature column (all but
+    the target, the id column and `orbit_id`) its type (`number` or `text`; booleans are text) and,
+    for text columns, the sorted distinct values (`categories` is null and `truncated` true above
+    MAX_CATEGORIES). Names and category values only, no rows. The wrapper uses it to check requests."""
+    meta = json.loads((input_dir / META_FILE).read_text(encoding="utf-8"))
+    frame = pd.read_csv(input_dir / "train.csv")
+    skip = {meta.get("target"), meta.get("id_column"), "orbit_id"} - {None}
+    columns = {}
+    for name in (c for c in frame.columns if c not in skip):
+        column = frame[name]
+        if pd.api.types.is_numeric_dtype(column) and not pd.api.types.is_bool_dtype(column):
+            columns[str(name)] = {"type": "number"}
+            continue
+        values = sorted({str(v) for v in column.dropna()})
+        columns[str(name)] = ({"type": "text", "categories": values} if len(values) <= MAX_CATEGORIES
+                              else {"type": "text", "categories": None, "truncated": True})
+    return {"features_order": list(columns), "columns": columns}
+
+
+def _write_features(input_dir: Path) -> Path:
+    path = input_dir / FEATURES_FILE
+    path.write_text(json.dumps(build_features(input_dir), indent=1), encoding="utf-8")
+    return path
+
+
 def _signature(sample: pd.DataFrame, preds: pd.Series):
-    """The sample's column names, all required but untyped. MLflow's inferred types are stricter
+    """The sample's column names, untyped and optional. MLflow's inferred types are stricter
     than the fitted pipeline, which does its own preprocessing and copes with gaps: they reject a
-    null in an integer column (and cut 1.5 to 1 in one). Untyped columns accept any value and
-    still give a clear error for a missing column."""
+    null in an integer column (and cut 1.5 to 1 in one). Untyped columns accept any value. They
+    are optional so that MLflow's schema enforcement, whose errors are long, lets a request with a
+    missing column or no rows through to the model wrapper, which says what to send."""
     from mlflow.models import ModelSignature, infer_signature
     from mlflow.types import ColSpec, Schema
     from mlflow.types.schema import AnyType
 
     outputs = infer_signature(model_output=preds).outputs
-    return ModelSignature(inputs=Schema([ColSpec(AnyType(), str(c)) for c in sample.columns]),
+    return ModelSignature(inputs=Schema([ColSpec(AnyType(), str(c), required=False) for c in sample.columns]),
                           outputs=outputs)
 
 
@@ -172,7 +202,8 @@ def _log_model(mlflow, export, input_dir: Path, name: str, run_id: str, custom: 
     with mlflow.start_run(run_id=run_id):
         return mlflow.pyfunc.log_model(
             name="model", python_model=str(Path(__file__).with_name("orbit_model.py")),
-            artifacts={"model": str(export.model_path), "meta": str(input_dir / META_FILE)},
+            artifacts={"model": str(export.model_path), "meta": str(input_dir / META_FILE),
+                       "features": str(_write_features(input_dir))},
             code_paths=[str(input_dir / HELPER_FILE), *([str(custom)] if custom else [])],
             pip_requirements=pip_requirements(),
             signature=_signature(sample, preds), input_example=sample.head(5),
@@ -182,13 +213,13 @@ def _log_model(mlflow, export, input_dir: Path, name: str, run_id: str, custom: 
 @contextlib.contextmanager
 def _quiet():
     """Hide MLflow's console chatter while logging: its notes that the host's libraries differ from
-    the pinned ones (expected: the model targets the serving container, not this machine), the
-    type-hint advice, and the registration progress lines."""
+    the pinned ones (expected: the model targets the serving container, not this machine), warnings,
+    and the registration progress lines, which it prints straight to stderr, not through logging."""
     logger = logging.getLogger("mlflow")
     level = logger.level
     logger.setLevel(logging.ERROR)
     try:
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
             warnings.simplefilter("ignore")
             yield
     finally:
@@ -203,11 +234,11 @@ def register_model(run_dir: Path, export, model_name: str | None = None, promote
     result = RegistryResult()
     previous = None
     try:
-        import mlflow
-
         from .tracking import configure_mlflow_env
 
-        configure_mlflow_env()
+        configure_mlflow_env()  # before the import: MLflow prints a hint when it is imported
+        import mlflow
+
         info = json.loads((run_dir / "tracking.json").read_text())
         uri, run_id = info["uri"], info["run_id"]
         client = mlflow.MlflowClient(tracking_uri=uri, registry_uri=uri)

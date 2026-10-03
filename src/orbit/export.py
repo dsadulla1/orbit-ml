@@ -431,6 +431,48 @@ def _accept(res: ExportResult, export_dir: Path, input_dir: Path, work: Path, pr
         shutil.copyfile(custom, res.custom_module)
 
 
+class ReuseError(Exception):
+    """There is no verified export to register again; the message says so in plain words."""
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_verified_export(run_dir: Path) -> ExportResult:
+    """The accepted export of `run_dir`, for registering it again without the LLM. Nothing is
+    unpickled: the files must be the regular files `export.json` describes (size and sha256), and
+    the export's input folder must still be there."""
+    export_dir = Path(run_dir) / "export"
+    none = ReuseError(f"no verified export in {export_dir}; run without --reuse")
+    try:
+        info = json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise none from None
+    if not isinstance(info, dict) or info.get("ok") is not True:
+        raise none
+    sample_input, sample_pred = export_dir / "sample_input.csv", export_dir / "sample_predictions.csv"
+    model = export_dir / MODEL_FILE
+    custom = export_dir / CUSTOM_FILE if info.get("custom_module") else None
+    needed = [model, sample_input, sample_pred] + ([custom] if custom else [])
+    if not all(_regular(p) for p in needed):
+        raise none
+    for path, size_key, sha_key in [(model, "model_bytes", "model_sha256"),
+                                    *([(custom, "custom_module_bytes", "custom_module_sha256")] if custom else [])]:
+        if path.stat().st_size != info.get(size_key) or _sha256(path) != info.get(sha_key):
+            raise ReuseError(f"{path.name} in {export_dir} no longer matches export.json (it was "
+                             "changed after the export was verified); run without --reuse")
+    if not all(_regular(export_dir / "input" / name) for name in ("train.csv", "orbit_meta.json")):
+        raise ReuseError(f"{export_dir / 'input'} is missing; run without --reuse")
+    return ExportResult(True, model, sample_input, sample_pred, attempts=int(info.get("attempts") or 0),
+                        node_id=info.get("node_id"), custom_module=custom,
+                        notes=list(info.get("notes") or []))
+
+
 def _write_summary(res: ExportResult, export_dir: Path) -> None:
     """export.json: the outcome only, no code and no data."""
     summary = {"ok": res.ok, "node_id": res.node_id, "attempts": res.attempts, "error": res.error,

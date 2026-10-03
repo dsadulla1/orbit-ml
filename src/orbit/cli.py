@@ -265,7 +265,6 @@ def _export_model(task: Task, journal: Journal, llm, sandbox, exec_timeout: int,
     """Export the best experiment as one verified model and register it in MLflow. Problems are
     printed as warnings and never raise; returns whether the export worked."""
     from .export import export_best
-    from .registry import register_model
 
     console.print("\n[dim]Exporting the best model (refit on all labeled rows) ...[/]")
     try:
@@ -274,18 +273,29 @@ def _export_model(task: Task, journal: Journal, llm, sandbox, exec_timeout: int,
         if not res.ok:
             _print_export_failure(task.run_dir, res)
             return False
-        size = res.model_path.stat().st_size / 1e6
-        console.print(f"Model: exported (experiment #{res.node_id}, {res.attempts} attempt"
-                      f"{'s' * (res.attempts != 1)}, {size:.1f} MB) -> {escape(str(res.model_path))}")
+        _print_exported(res)
         if not register:
             return True
-        reg = register_model(task.run_dir, res, model_name=model_name, force_champion=force_champion)
+        _register_exported(task.run_dir, res, model_name, force_champion)
     except KeyboardInterrupt:
         console.print("\n[yellow]Model export interrupted; the run's results are intact.[/]")
         return False
+    return True
+
+
+def _print_exported(res) -> None:
+    size = res.model_path.stat().st_size / 1e6
+    console.print(f"Model: exported (experiment #{res.node_id}, {res.attempts} attempt"
+                  f"{'s' * (res.attempts != 1)}, {size:.1f} MB) -> {escape(str(res.model_path))}")
+
+
+def _register_exported(run_dir: Path, res, model_name: str | None, force_champion: bool) -> bool:
+    from .registry import register_model
+
+    reg = register_model(run_dir, res, model_name=model_name, force_champion=force_champion)
     if reg.version is None:
         console.print(f"[yellow]Model registration failed:[/] {escape(reg.message)}")
-        return True
+        return False
     console.print(f"Registered model {escape(reg.name)} version {reg.version}"
                   + (f", alias {escape(', '.join(reg.aliases))}" if reg.aliases else ""))
     console.print(f"  [dim]{escape(reg.message)}[/]")
@@ -471,21 +481,29 @@ def export(
     attempts: int = typer.Option(3, min=1, help="Attempts at a verified export"),
     hint: str = typer.Option(None, "--hint", help="Extra guidance for the LLM, at most 1000 characters "
                              "(for example after a failed export)"),
+    reuse: bool = typer.Option(False, "--reuse", help="Do not export again: register the run's existing "
+                               "verified export as a new model version (no LLM, no Docker)"),
 ):
     """Refit a run's best experiment on all labeled rows, verify it and register it in MLflow.
 
     The model lands in RUN_DIR/export/model.pkl; with a tracking.json it is also registered as a
     new version of an MLflow model, and the alias `champion` moves to it when its validation
-    score is at least as good as the current champion's.
+    score is at least as good as the current champion's. With --reuse the verified export of an
+    earlier call is registered again (after a registry problem, with another --model-name, or
+    after upgrading orbit) without asking the LLM for anything.
 
     Examples:
       orbit export runs/20261001-120000-wine
       orbit export runs/20261001-120000-wine --model-name wine-quality --force-champion
       orbit export runs/20261001-120000-wine --hint "Put the feature code in orbit_custom.py"
+      orbit export runs/20261001-120000-wine --reuse
     """
     from .prompts import MAX_HINT_CHARS
     from .sandbox import DockerSandbox, check_docker
 
+    if reuse:
+        _reuse_export(run_dir, model_name, force_champion, no_register, hint)
+        return
     if hint is not None and len(hint) > MAX_HINT_CHARS:
         raise typer.BadParameter(f"{len(hint)} characters; the limit is {MAX_HINT_CHARS}", param_hint="--hint")
 
@@ -499,6 +517,24 @@ def export(
     if not _export_model(task, journal, llm, DockerSandbox(sb_settings), sb_settings.timeout,
                          sb_settings.cpus, register=not no_register, model_name=model_name,
                          force_champion=force_champion, attempts=attempts, hint=hint):
+        raise typer.Exit(1)
+
+
+def _reuse_export(run_dir: Path, model_name: str | None, force_champion: bool, no_register: bool,
+                  hint: str | None) -> None:
+    from .export import ReuseError, load_verified_export
+
+    if no_register or hint is not None:
+        raise typer.BadParameter("--reuse registers the existing export: it cannot be combined with "
+                                 "--no-register or --hint", param_hint="--reuse")
+    try:
+        res = load_verified_export(run_dir)
+    except ReuseError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1)
+    console.print("\n[dim]Registering the existing verified export ...[/]")
+    _print_exported(res)
+    if not _register_exported(run_dir, res, model_name, force_champion):
         raise typer.Exit(1)
 
 
@@ -639,32 +675,50 @@ def _serve_start(srv, model: str, version: int | None, alias: str | None, port: 
 
 @app.command()
 def predict(
-    endpoint: str = typer.Argument(..., help="Endpoint URL (http://127.0.0.1:8090) or a served model name"),
+    endpoint: str = typer.Argument(..., help="Endpoint URL (http://127.0.0.1:8090), a served model name "
+                                   "or a models:/... URI"),
     rows: Path = typer.Argument(..., exists=True, dir_okay=False, help="CSV of raw feature rows"),
     out: Path = typer.Option(Path("predictions.csv"), "--out", help="Where to write the predictions"),
     target_col: str = typer.Option(None, "--target-col", help="Column to leave out of the request"),
     keep_columns: bool = typer.Option(False, "--keep-columns", help="Repeat the input columns in the output"),
+    strict: bool = typer.Option(False, "--strict", help="Send nothing when a text value was not seen "
+                                "in training (needs a model name, not a URL)"),
 ):
     """Score the rows of a CSV against a running `orbit serve` endpoint.
 
     Rows are sent in chunks of 500; the output keeps their order, with one `prediction` column.
+    Given a model name, the rows are checked first against the columns the model was trained on:
+    a missing column or text in a numeric column stops the run before anything is sent. Values not
+    seen in training and missing values are scored and counted in the summary; --strict stops
+    on the first kind too.
 
     Examples:
       orbit predict retail-spend-90d new_customers.csv --out scored.csv
+      orbit predict retail-spend-90d new_customers.csv --strict
       orbit predict http://127.0.0.1:8090 new_customers.csv --keep-columns
     """
     from . import serve as srv
 
     try:
-        url = endpoint if endpoint.startswith(("http://", "https://")) else srv.endpoint_for(
-            endpoint, srv.list_containers())
+        features = None
+        if endpoint.startswith(("http://", "https://")):
+            url = endpoint
+        else:
+            container = srv.container_for(endpoint, srv.list_containers())
+            url = f"http://127.0.0.1:{container.port}"
+            from .tracking import configure_mlflow_env
+
+            configure_mlflow_env()
+            features = srv.fetch_features(srv.served_uri(container))
         start = time.monotonic()
-        count = srv.predict_csv(url, rows, out, target_col=target_col, keep_columns=keep_columns)
+        scored = srv.predict_csv(url, rows, out, target_col=target_col, keep_columns=keep_columns,
+                                 features=features, strict=strict)
     except srv.ServeError as e:
         console.print(f"[red]{escape(str(e))}[/]")
         raise typer.Exit(1)
-    console.print(f"Scored {count} rows against {escape(url)} in {time.monotonic() - start:.1f}s "
-                  f"-> {escape(str(out))}")
+    notes = "; ".join(scored.notes())
+    console.print(f"Scored {scored.rows:,} row{'s' * (scored.rows != 1)} in {time.monotonic() - start:.1f} s "
+                  f"-> {escape(str(out))}." + (f" {escape(notes[:1].upper() + notes[1:])}." if notes else ""))
 
 
 def _score(text) -> str:

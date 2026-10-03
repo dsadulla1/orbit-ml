@@ -2,6 +2,7 @@ import json
 import socket
 import stat
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pandas as pd
@@ -78,7 +79,7 @@ def _echo(path, body):
     return 200, {"predictions": [{"prediction": r["x"] * 10} for r in rows]}
 
 
-PS_LINE = "orbit-serve-wine-8090\t1\tmodels:/wine@champion\t3\t127.0.0.1:8090->8080/tcp\t5 minutes ago"
+PS_LINE = "orbit-serve-wine-8090\t1\tmodels:/wine@champion\t3\t127.0.0.1:8090->8080/tcp"
 
 INSPECT = [{
     "Config": {"Labels": {"com.docker.compose.project": "myproj", "com.docker.compose.service": "tracking"},
@@ -234,15 +235,15 @@ def test_port_is_free_sees_a_listener():
 def test_parse_ps_keeps_only_orbit_serving_containers():
     output = "\n".join([
         PS_LINE,
-        "orbit-serve-imposter\t\tmodels:/x@y\t1\t127.0.0.1:1->8080/tcp\t1 hour ago",    # no label
-        "other-container\t1\tmodels:/x@y\t1\t127.0.0.1:2->8080/tcp\t1 hour ago",       # no prefix
-        "orbit-serve-b\t1\tmodels:/b/2\t2\t\t2 hours ago",                              # no port
+        "orbit-serve-imposter\t\tmodels:/x@y\t1\t127.0.0.1:1->8080/tcp",    # no label
+        "other-container\t1\tmodels:/x@y\t1\t127.0.0.1:2->8080/tcp",       # no prefix
+        "orbit-serve-b\t1\tmodels:/b/2\t2\t",                              # no port
         "garbage",
     ])
     got = srv.parse_ps(output)
-    assert [(c.name, c.model, c.version, c.port, c.uptime) for c in got] == [
-        ("orbit-serve-wine-8090", "models:/wine@champion", "3", 8090, "5 minutes ago"),
-        ("orbit-serve-b", "models:/b/2", "2", None, "2 hours ago")]
+    assert [(c.name, c.model, c.version, c.port) for c in got] == [
+        ("orbit-serve-wine-8090", "models:/wine@champion", "3", 8090),
+        ("orbit-serve-b", "models:/b/2", "2", None)]
 
 
 def test_stop_targets_refuse_foreign_names():
@@ -309,7 +310,7 @@ def test_predict_csv_chunks_nan_and_order(server, tmp_path):
     rows["f"] = [0.5, None, 1.5, 2.5, 3.5, 4.5, 5.5]
     src, out = tmp_path / "rows.csv", tmp_path / "sub" / "out.csv"
     rows.to_csv(src, index=False)
-    assert srv.predict_csv(s.url, src, out, chunk=3) == 7
+    assert srv.predict_csv(s.url, src, out, chunk=3).rows == 7
     posts = [json.loads(b)["dataframe_records"] for _, p, b in s.requests if p == "/invocations"]
     assert [len(p) for p in posts] == [3, 3, 1]
     assert posts[1][0]["name"] is None and posts[0][1]["f"] is None  # NaN went out as null
@@ -380,6 +381,7 @@ case "$1" in
   inspect)
     case "$*" in
       *State.Running*) echo true ;;
+      *State.StartedAt*) cat "$FAKE_STARTED" ;;
       *) cat "$FAKE_INSPECT" ;;
     esac ;;
   run) echo 0123456789abcdef ;;
@@ -403,6 +405,10 @@ def fake_docker(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_LOG", str(tmp_path / "log.txt"))
     monkeypatch.setenv("FAKE_INSPECT", str(tmp_path / "inspect.json"))
     monkeypatch.setenv("FAKE_PS", str(tmp_path / "ps.txt"))
+    started = datetime.now(timezone.utc) - timedelta(minutes=7, seconds=20)
+    (tmp_path / "started.txt").write_text(
+        f"/orbit-serve-wine-8090\t{started:%Y-%m-%dT%H:%M:%S}.123456789Z\n")
+    monkeypatch.setenv("FAKE_STARTED", str(tmp_path / "started.txt"))
     monkeypatch.delenv("FAKE_IMAGE_RC", raising=False)
     monkeypatch.delenv("ORBIT_SERVE_IMAGE", raising=False)
     monkeypatch.delenv("ORBIT_SERVE_MEMORY", raising=False)
@@ -432,7 +438,7 @@ def test_cli_list(fake_docker):
     result = runner.invoke(app, ["serve", "--list"])
     assert result.exit_code == 0
     flat = " ".join(result.output.split())
-    assert "wine" in flat and "8090" in flat and "5 minutes ago" in flat
+    assert "wine" in flat and "8090" in flat and "up 7 min" in flat and "ago" not in flat
     assert any(c.startswith("ps ") and "label=orbit.serve=1" in c for c in fake_docker())
 
 
@@ -514,3 +520,222 @@ def test_cli_predict_url_error_is_escaped(server, tmp_path):
     pd.DataFrame({"x": [1]}).to_csv(rows, index=False)
     result = runner.invoke(app, ["predict", s.url, str(rows), "--out", str(tmp_path / "o.csv")])
     assert result.exit_code == 1 and "bad [red]markup[/red]" in result.output
+
+
+# --- uptime -------------------------------------------------------------------------------------
+
+NOW = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("started, expected", [
+    ("2026-10-04T11:59:15.5Z", "up 45 s"),
+    ("2026-10-04T11:59:59.999999999Z", "up 1 s"),
+    ("2026-10-04T11:52:30.123456789Z", "up 7 min"),
+    ("2026-10-04T11:00:00Z", "up 1 h"),
+    ("2026-10-04T09:55:00.000000001Z", "up 2 h 5 min"),
+    ("2026-10-01T09:00:00Z", "up 3 d"),
+    ("2026-10-04T13:00:00+01:00", "up 0 s"),
+    ("2026-10-04T12:07:00Z", "up 0 s"),          # a clock that runs behind
+    ("2026-10-04T12:52:30+01:00", "up 7 min"),
+    ("0001-01-01T00:00:00Z", "up ?"),            # Docker's zero time
+    ("yesterday", "up ?"),
+    ("", "up ?"),
+    ("2026-13-45T99:00:00Z", "up ?"),
+])
+def test_format_uptime(started, expected):
+    assert srv.format_uptime(started, NOW) == expected
+
+
+def test_list_containers_uses_the_start_time_not_dockers_text(fake_docker):
+    (c,) = srv.list_containers()
+    assert c.uptime == "up 7 min"
+    assert not any("RunningFor" in call for call in fake_docker())
+    assert any("State.StartedAt" in call for call in fake_docker())
+
+
+def test_list_containers_with_unreadable_start_time(fake_docker, tmp_path):
+    (tmp_path / "started.txt").write_text("/orbit-serve-wine-8090\tgarbage\n")
+    assert [c.uptime for c in srv.list_containers()] == ["up ?"]
+    (tmp_path / "started.txt").write_text("")
+    assert [c.uptime for c in srv.list_containers()] == ["up ?"]
+
+
+# --- checks before sending ------------------------------------------------------------------------
+
+FEATURES = {"features_order": ["x", "job", "age"],
+            "columns": {"x": {"type": "number"}, "job": {"type": "text", "categories": ["clerk", "nurse"]},
+                        "age": {"type": "number"}}}
+
+
+def _csv(tmp_path, frame, name="rows.csv"):
+    path = tmp_path / name
+    frame.to_csv(path, index=False)
+    return path
+
+
+def _ok(path, body):
+    rows = json.loads(body)["dataframe_records"]
+    return 200, {"predictions": [{"prediction": 0.5} for _ in rows]}
+
+
+def _frame(**extra):
+    return pd.DataFrame({"x": [1, 2, 3], "job": ["clerk", "nurse", "clerk"], "age": [30, 40, 50], **extra})
+
+
+def test_check_rows_missing_columns_message():
+    with pytest.raises(srv.ServeError) as e:
+        srv.check_rows(pd.DataFrame({"x": [1]}), FEATURES)
+    assert str(e.value) == ("Missing feature column(s): job, age (2 of 3). Send every feature column; "
+                            "columns not needed (the target, orbit_id) are ignored.")
+    many = {"features_order": [f"c{i}" for i in range(15)],
+            "columns": {f"c{i}": {"type": "number"} for i in range(15)}}
+    with pytest.raises(srv.ServeError) as e:
+        srv.check_rows(pd.DataFrame({"c0": [1]}), many)
+    assert "c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 and 4 more (14 of 15)." in str(e.value)
+
+
+def test_check_rows_non_numeric_value_names_column_value_and_row():
+    rows = _frame()
+    rows["age"] = ["30", "fifty", "50"]
+    with pytest.raises(srv.ServeError) as e:
+        srv.check_rows(rows, FEATURES)
+    assert str(e.value) == "Column 'age' must be a number; row 2 has 'fifty'."
+    rows["x"] = ["1", "2", "n/a"]
+    with pytest.raises(srv.ServeError) as e:
+        srv.check_rows(rows, FEATURES)
+    assert str(e.value) == ("Column 'x' must be a number; row 3 has 'n/a'. "
+                            "Column 'age' must be a number; row 2 has 'fifty'.")
+
+
+def test_check_rows_accepts_missing_and_numeric_text():
+    rows = _frame()
+    rows["age"] = ["30", "nan", ""]          # text that is a number, or missing
+    rows.loc[1, "x"] = None
+    sent, scored = srv.check_rows(rows, FEATURES)
+    assert list(sent.columns) == ["x", "job", "age"] and scored.missing == {"x": 1}
+
+
+def test_check_rows_reports_unseen_missing_and_extra_columns():
+    rows = _frame(extra1=1, extra2=2)
+    rows.loc[0, "job"] = "astronaut"
+    rows.loc[2, "job"] = None
+    rows.loc[1, "age"] = None
+    sent, scored = srv.check_rows(rows, FEATURES)
+    assert list(sent.columns) == ["x", "job", "age"]
+    assert scored.extra_columns == 2 and scored.unseen == {"job": {"astronaut": 1}} and scored.unseen_rows == 1
+    assert scored.missing == {"job": 1, "age": 1} and scored.missing_rows == 2
+    assert scored.notes() == ["1 row had values not seen in training (job: astronaut)",
+                              "2 rows had missing values (age 1, job 1)", "ignored 2 extra columns"]
+    assert srv.Scored(5).notes() == []
+
+
+def test_check_rows_unseen_values_are_compared_as_text():
+    features = {"features_order": ["z"], "columns": {"z": {"type": "text", "categories": ["1", "2", "x"]}}}
+    _, scored = srv.check_rows(pd.DataFrame({"z": [1.0, 2.0, 3.0]}), features)
+    assert scored.unseen == {"z": {"3": 1}}
+    truncated = {"features_order": ["z"], "columns": {"z": {"type": "text", "categories": None, "truncated": True}}}
+    assert srv.check_rows(pd.DataFrame({"z": ["anything"]}), truncated)[1].unseen == {}
+
+
+def test_predict_csv_with_features_sends_only_feature_columns(server, tmp_path):
+    s = server(_ok)
+    rows = _frame(extra=1, label="y")
+    rows.loc[0, "job"] = "astronaut"
+    scored = srv.predict_csv(s.url, _csv(tmp_path, rows), tmp_path / "o.csv", features=FEATURES)
+    sent = json.loads(s.requests[0][2])["dataframe_records"]
+    assert set(sent[0]) == {"x", "job", "age"} and scored.extra_columns == 2 and scored.unseen_rows == 1
+    assert len(pd.read_csv(tmp_path / "o.csv")) == 3
+
+
+def test_predict_csv_precheck_failures_send_nothing(server, tmp_path):
+    s = server(_ok)
+    out = tmp_path / "o.csv"
+    with pytest.raises(srv.ServeError, match=r"Missing feature column\(s\): age \(1 of 3\)"):
+        srv.predict_csv(s.url, _csv(tmp_path, _frame().drop(columns=["age"])), out, features=FEATURES)
+    bad = _frame()
+    bad["x"] = ["1", "oops", "3"]
+    with pytest.raises(srv.ServeError, match="Column 'x' must be a number; row 2 has 'oops'."):
+        srv.predict_csv(s.url, _csv(tmp_path, bad), out, features=FEATURES)
+    (tmp_path / "empty.csv").write_text("")
+    with pytest.raises(srv.ServeError, match="empty.csv has no rows."):
+        srv.predict_csv(s.url, tmp_path / "empty.csv", out, features=FEATURES)
+    assert s.requests == [] and not out.exists()
+
+
+def test_predict_csv_strict(server, tmp_path):
+    s = server(_ok)
+    rows = pd.DataFrame({"x": range(8), "job": [f"new{i}" for i in range(7)] + ["clerk"], "age": 1})
+    with pytest.raises(srv.ServeError) as e:
+        srv.predict_csv(s.url, _csv(tmp_path, rows), tmp_path / "o.csv", features=FEATURES, strict=True)
+    text = str(e.value)
+    assert text.startswith("--strict: 7 value(s) were not seen in training, so nothing was sent: ")
+    assert "job 'new0' (row 1)" in text and "job 'new4' (row 5)" in text and "new5" not in text
+    assert text.endswith("and 2 more.") and s.requests == []
+    srv.predict_csv(s.url, _csv(tmp_path, _frame()), tmp_path / "o.csv", features=FEATURES, strict=True)
+    with pytest.raises(srv.ServeError, match="--strict needs the model's features file"):
+        srv.predict_csv(s.url, _csv(tmp_path, _frame()), tmp_path / "o.csv", strict=True)
+
+
+def test_server_error_is_trimmed_and_names_missing_columns(server, tmp_path):
+    names = ", ".join(f"'col{i}'" for i in range(40))
+    long = "Failed to predict data '" + "x" * 500 + f"'. Error: Model is missing inputs [{names}]."
+    s = server(lambda p, b: (400, {"message": long}))
+    with pytest.raises(srv.ServeError) as e:
+        srv.predict_csv(s.url, _csv(tmp_path, _frame()), tmp_path / "o.csv")
+    first, second = str(e.value).split("\n")
+    assert len(first) < 400 and first.startswith("The endpoint rejected the request: HTTP 400: Model is missing")
+    assert second.startswith("Missing feature column(s): col0, col1,") and "and 30 more (40 of 40)" in second
+    s = server(lambda p, b: (400, {"message": "y" * 1000}))
+    with pytest.raises(srv.ServeError) as e:
+        srv.predict_csv(s.url, _csv(tmp_path, _frame()), tmp_path / "o.csv")
+    assert str(e.value).endswith("y" * 300 + "...") and "y" * 301 not in str(e.value)
+
+
+def test_cli_predict_checks_and_summary(fake_docker, tmp_path, server, monkeypatch):
+    s = server(_ok)
+    (tmp_path / "ps.txt").write_text(PS_LINE.replace("8090", str(s.port)) + "\n")
+    seen = []
+    monkeypatch.setattr(srv, "fetch_features", lambda uri: seen.append(uri) or FEATURES)
+    rows = _frame(extra=1)
+    rows.loc[0, "job"] = "astro[naut]"
+    rows.loc[1, "age"] = None
+    rows.loc[2, "x"] = None
+    out = tmp_path / "scored.csv"
+    result = runner.invoke(app, ["predict", "wine", str(_csv(tmp_path, rows)), "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert seen == ["models:/wine/3"]       # the version the container serves
+    flat = " ".join(result.output.split())
+    assert "Scored 3 rows in " in flat and f"-> {out}." in flat
+    assert "1 row had values not seen in training (job: astro[naut])" in flat
+    assert "2 rows had missing values (age 1, x 1); ignored 1 extra column." in flat
+
+    result = runner.invoke(app, ["predict", "wine", str(_csv(tmp_path, rows)), "--out", str(out), "--strict"])
+    assert result.exit_code == 1 and "--strict: 1 value(s)" in " ".join(result.output.split())
+    result = runner.invoke(app, ["predict", "wine", str(_csv(tmp_path, _frame().drop(columns="job"))),
+                                 "--out", str(out)])
+    assert result.exit_code == 1 and "Missing feature column(s): job (1 of 3)" in " ".join(result.output.split())
+    assert len(s.requests) == 1   # only the first run sent anything
+
+
+def test_cli_predict_without_features_or_with_a_url(fake_docker, tmp_path, server, monkeypatch):
+    s = server(_ok)
+    (tmp_path / "ps.txt").write_text(PS_LINE.replace("8090", str(s.port)) + "\n")
+    monkeypatch.setattr(srv, "fetch_features", lambda uri: None)   # a model registered earlier
+    path = _csv(tmp_path, _frame().drop(columns="age"))
+    result = runner.invoke(app, ["predict", "wine", str(path), "--out", str(tmp_path / "a.csv")])
+    assert result.exit_code == 0 and "Scored 3 rows" in result.output
+    fetched = []
+    monkeypatch.setattr(srv, "fetch_features", lambda uri: fetched.append(uri))
+    result = runner.invoke(app, ["predict", s.url, str(path), "--out", str(tmp_path / "b.csv")])
+    assert result.exit_code == 0 and fetched == []
+    result = runner.invoke(app, ["predict", s.url, str(path), "--strict"])
+    assert result.exit_code == 1 and "--strict needs" in " ".join(result.output.split())
+
+
+def test_fetch_features_fails_soft(monkeypatch):
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    assert srv.fetch_features("models:/wine/3") is None
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:9")
+    monkeypatch.setenv("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+    monkeypatch.setenv("MLFLOW_HTTP_REQUEST_TIMEOUT", "2")
+    assert srv.fetch_features("models:/wine/3") is None

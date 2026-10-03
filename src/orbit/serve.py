@@ -15,7 +15,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +36,9 @@ DEFAULT_ALIAS = "champion"
 MLFLOW_CONTAINER = "orbit-mlflow-1"
 CHUNK_ROWS = 500
 REQUEST_TIMEOUT = 60
+FEATURES_ARTIFACT = "artifacts/orbit_features.json"   # inside the model, see registry._log_model
+MAX_NAMES = 10             # column names listed in a message
+ERROR_CHARS = 300          # of a server's error message shown to the user
 
 
 class ServeError(Exception):
@@ -47,7 +51,7 @@ class Container:
     model: str
     version: str
     port: int | None
-    uptime: str
+    uptime: str = ""
 
 
 def image_name() -> str:
@@ -298,7 +302,8 @@ def wait_ready(port: int, alive: Callable[[], bool], timeout: float = 180, inter
 # --- Listing and stopping ---------------------------------------------------------------------
 
 PS_FORMAT = ("{{.Names}}\t{{.Label \"" + LABEL_MARK + "\"}}\t{{.Label \"" + LABEL_MODEL + "\"}}\t"
-             "{{.Label \"" + LABEL_VERSION + "\"}}\t{{.Ports}}\t{{.RunningFor}}")
+             "{{.Label \"" + LABEL_VERSION + "\"}}\t{{.Ports}}")
+STARTED_FORMAT = "{{.Name}}\t{{.State.StartedAt}}"
 
 
 def parse_ps(output: str) -> list[Container]:
@@ -307,22 +312,56 @@ def parse_ps(output: str) -> list[Container]:
     found = []
     for line in output.splitlines():
         parts = line.split("\t")
-        if len(parts) < 6:
+        if len(parts) < 5:
             continue
-        name, mark, model, version, ports, uptime = (p.strip() for p in parts[:6])
+        name, mark, model, version, ports = (p.strip() for p in parts[:5])
         if not name.startswith(NAME_PREFIX) or mark != "1":
             continue
         m = re.search(r"127\.0\.0\.1:(\d+)->", ports)
-        found.append(Container(name, model, version, int(m.group(1)) if m else None, uptime))
+        found.append(Container(name, model, version, int(m.group(1)) if m else None))
     return found
 
 
-def list_containers() -> list[Container]:
+_STARTED = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$")
+
+
+def format_uptime(started: str, now: datetime | None = None) -> str:
+    """`up 45 s`, `up 7 min`, `up 2 h 5 min` or `up 3 d` from a container's `State.StartedAt`
+    (RFC 3339, nanoseconds and all); `up ?` when it cannot be read."""
+    m = _STARTED.match((started or "").strip())
+    if not m:
+        return "up ?"
+    try:
+        begun = datetime.fromisoformat(m.group(1) + ("+00:00" if m.group(2) == "Z" else m.group(2)))
+    except ValueError:
+        return "up ?"
+    if begun.year < 2000:  # Docker's zero time: the container never started
+        return "up ?"
+    seconds = max(0, int((now or datetime.now(timezone.utc)).timestamp() - begun.timestamp()))
+    if seconds < 60:
+        return f"up {seconds} s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"up {minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"up {hours} h" + (f" {minutes} min" if minutes else "")
+    return f"up {hours // 24} d"
+
+
+def list_containers(now: datetime | None = None) -> list[Container]:
     out = docker("ps", "--filter", f"name={NAME_PREFIX}", "--filter", f"label={LABEL_MARK}=1",
                  "--format", PS_FORMAT)
     if out.returncode != 0:
         raise ServeError(f"docker ps failed: {out.stderr.strip()[:200]}")
-    return parse_ps(out.stdout)
+    containers = parse_ps(out.stdout)
+    if containers:  # `docker ps` only has Docker's own rounded "About a minute ago" text
+        started = docker("inspect", "--format", STARTED_FORMAT, *[c.name for c in containers])
+        times = dict(line.strip().lstrip("/").split("\t", 1) for line in started.stdout.splitlines()
+                     if "\t" in line) if started.returncode == 0 else {}
+        for c in containers:
+            c.uptime = format_uptime(times.get(c.name, ""), now)
+    return containers
 
 
 def stop_targets(containers: list[Container], target: str) -> list[str]:
@@ -353,8 +392,8 @@ def invocations_url(url: str) -> str:
     return base if base.endswith("/invocations") else base + "/invocations"
 
 
-def endpoint_for(model: str, containers: list[Container]) -> str:
-    """The base URL of the one running container that serves registered model `model`."""
+def container_for(model: str, containers: list[Container]) -> Container:
+    """The one running container that serves registered model `model` (a name or a URI)."""
     matches = [c for c in containers if c.port and model in (model_name_of(c.model), c.model)]
     if not matches:
         running = ", ".join(f"{model_name_of(c.model)} (port {c.port})" for c in containers)
@@ -363,8 +402,156 @@ def endpoint_for(model: str, containers: list[Container]) -> str:
     if len(matches) > 1:
         ports = ", ".join(f"{c.name} (port {c.port})" for c in matches)
         raise ServeError(f"{model!r} is served more than once: {ports}. Pass the endpoint URL.")
-    return f"http://127.0.0.1:{matches[0].port}"
+    return matches[0]
 
+
+def endpoint_for(model: str, containers: list[Container]) -> str:
+    """The base URL of the one running container that serves registered model `model`."""
+    return f"http://127.0.0.1:{container_for(model, containers).port}"
+
+
+# --- Checking rows before they are sent ---------------------------------------------------------
+
+def served_uri(container: Container) -> str:
+    """The exact model version a container serves, as a models:/ URI."""
+    if container.version.isdigit():
+        return f"models:/{model_name_of(container.model)}/{container.version}"
+    return container.model
+
+
+def fetch_features(uri: str) -> dict | None:
+    """The model's features file (see `registry.build_features`) through the MLflow SDK, or None
+    when it cannot be fetched: models registered before it existed have none, and the checks
+    are a convenience, so any problem means "no checks"."""
+    import tempfile
+
+    if not os.environ.get("MLFLOW_TRACKING_URI"):
+        return None  # MLflow would fall back to a local ./mlruns folder
+    try:
+        import mlflow.artifacts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = mlflow.artifacts.download_artifacts(
+                artifact_uri=uri.rstrip("/") + "/" + FEATURES_ARTIFACT, dst_path=tmp)
+            features = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    ok = isinstance(features, dict) and isinstance(features.get("columns"), dict)
+    return features if ok and features.get("features_order") else None
+
+
+def missing_columns_message(missing: list[str], total: int) -> str:
+    more = f" and {len(missing) - MAX_NAMES} more" if len(missing) > MAX_NAMES else ""
+    return (f"Missing feature column(s): {', '.join(missing[:MAX_NAMES])}{more} ({len(missing)} of "
+            f"{total}). Send every feature column; columns not needed (the target, orbit_id) are "
+            "ignored.")
+
+
+def _text(value, limit: int = 40) -> str:
+    """A cell as short text; whole floats lose their `.0` (1.0 -> 1)."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _non_numbers(column: pd.Series) -> list[int]:
+    """Positions of values that are present but not numbers (the strings "nan" and "" count as
+    missing); the same rule as the model wrapper's."""
+    if pd.api.types.is_numeric_dtype(column) or pd.api.types.is_bool_dtype(column):
+        return []
+    converted = pd.to_numeric(column, errors="coerce")
+    missing_text = column.map(lambda v: isinstance(v, str) and v.strip().lower() in ("", "nan"))
+    bad = converted.isna().to_numpy() & column.notna().to_numpy() & ~missing_text.to_numpy(dtype=bool)
+    return [int(i) for i in bad.nonzero()[0]]
+
+
+@dataclass
+class Scored:
+    rows: int
+    extra_columns: int = 0
+    unseen: dict = field(default_factory=dict)     # column -> {value: rows with it}
+    unseen_rows: int = 0
+    missing: dict = field(default_factory=dict)    # column -> missing cells
+    missing_rows: int = 0
+
+    def notes(self) -> list[str]:
+        """What the user should know about the rows that were scored, as short sentences."""
+        out = []
+        if self.unseen_rows:
+            cols = "; ".join(f"{c}: " + ", ".join(list(v)[:3]) + (", ..." if len(v) > 3 else "")
+                             for c, v in list(self.unseen.items())[:3])
+            out.append(f"{_n(self.unseen_rows, 'row')} had values not seen in training ({cols}"
+                       + ("; ..." if len(self.unseen) > 3 else "") + ")")
+        if self.missing_rows:
+            top = sorted(self.missing.items(), key=lambda kv: (-kv[1], kv[0]))
+            cols = ", ".join(f"{c} {n}" for c, n in top[:5]) + (", ..." if len(top) > 5 else "")
+            out.append(f"{_n(self.missing_rows, 'row')} had missing values ({cols})")
+        if self.extra_columns:
+            out.append(f"ignored {_n(self.extra_columns, 'extra column')}")
+        return out
+
+
+def _n(count: int, word: str) -> str:
+    return f"{count:,} {word}" + ("" if count == 1 else "s")
+
+
+def check_rows(rows: pd.DataFrame, features: dict) -> tuple[pd.DataFrame, Scored]:
+    """Check `rows` against the model's features file. Raises ServeError for what the server would
+    reject (missing feature columns, text where a number is needed) with the server's wording and
+    the row numbers of the CSV (the first data row is 1); returns the frame to send (the feature columns, in order) and what
+    is worth reporting afterwards: unseen text values, missing values and ignored columns."""
+    order = [str(c) for c in features["features_order"]]
+    specs = features["columns"]
+    absent = [c for c in order if c not in rows.columns]
+    if absent:
+        raise ServeError(missing_columns_message(absent, len(order)))
+    problems = []
+    for name in order:
+        if (specs.get(name) or {}).get("type") == "number":
+            bad = _non_numbers(rows[name])
+            if bad:
+                problems.append(f"Column '{name}' must be a number; row {bad[0] + 1} has "
+                                f"'{_text(rows[name].iloc[bad[0]])}'.")
+    if problems:
+        raise ServeError(" ".join(problems[:3]) + (f" {len(problems) - 3} more column(s) have the "
+                                                   "same problem." if len(problems) > 3 else ""))
+    sent = rows[order]
+    scored = Scored(len(rows), extra_columns=len(rows.columns) - len(order))
+    unseen_any = pd.Series(False, index=sent.index)
+    for name in order:
+        spec = specs.get(name) or {}
+        if spec.get("type") != "text" or spec.get("categories") is None:
+            continue
+        values = sent[name].dropna()
+        mask = ~values.map(_text).isin(set(spec["categories"]))
+        if mask.any():
+            counts: dict = {}
+            for v in values[mask].map(_text):
+                counts[v] = counts.get(v, 0) + 1
+            scored.unseen[name] = counts
+            unseen_any |= sent[name].index.isin(values[mask].index)
+    scored.unseen_rows = int(unseen_any.sum())
+    gaps = sent.isna()
+    scored.missing = {c: int(n) for c, n in gaps.sum().items() if n}
+    scored.missing_rows = int(gaps.any(axis=1).sum())
+    return sent, scored
+
+
+def strict_error(rows: pd.DataFrame, scored: Scored) -> str:
+    """The `--strict` refusal: up to 5 unseen values with the first row that has each."""
+    examples = []
+    for name, counts in scored.unseen.items():
+        for value in counts:
+            first = next(i for i, v in enumerate(rows[name]) if _text(v) == value and pd.notna(v))
+            examples.append(f"{name} '{value}' (row {first + 1})")
+    total = sum(sum(c.values()) for c in scored.unseen.values())
+    more = f", and {len(examples) - 5} more" if len(examples) > 5 else ""
+    return (f"--strict: {total} value(s) were not seen in training, so nothing was sent: "
+            f"{', '.join(examples[:5])}{more}.")
+
+
+# --- Scoring rows -------------------------------------------------------------------------------
 
 def _error_text(e: urllib.error.HTTPError) -> str:
     body = e.read().decode("utf-8", errors="replace")
@@ -374,8 +561,14 @@ def _error_text(e: urllib.error.HTTPError) -> str:
     except (ValueError, AttributeError):
         message = body
     message = " ".join(str(message).split())
+    names = re.search(r"[Mm]issing inputs \[([^\]]*)\]", message)  # models registered earlier
     message = message.rsplit("Error: ", 1)[-1]  # MLflow nests errors; the last one is the cause
-    return f"HTTP {e.code}: {message[:400]}"
+    text = f"HTTP {e.code}: {message[:ERROR_CHARS]}" + ("..." if len(message) > ERROR_CHARS else "")
+    if names:
+        found = re.findall(r"'([^']*)'", names.group(1))
+        if found:
+            text += f"\n{missing_columns_message(found, len(found))}"
+    return text
 
 
 def _post(url: str, body: str, timeout: float) -> list:
@@ -422,19 +615,35 @@ def _prediction_frame(preds: list) -> pd.DataFrame:
 
 
 def predict_csv(url: str, rows_path: Path, out_path: Path, target_col: str | None = None,
-                keep_columns: bool = False, chunk: int = CHUNK_ROWS) -> int:
-    """Score the rows of a CSV and write `out_path`; returns the number of rows."""
+                keep_columns: bool = False, chunk: int = CHUNK_ROWS, features: dict | None = None,
+                strict: bool = False) -> Scored:
+    """Score the rows of a CSV and write `out_path`. With the model's `features` the rows are
+    checked first and nothing is sent when they would be rejected (or, with `strict`, when a text
+    value was not seen in training). Returns what was scored."""
     try:
         rows = pd.read_csv(rows_path)
+    except pd.errors.EmptyDataError:
+        raise ServeError(f"{rows_path} has no rows.") from None
     except Exception as e:  # noqa: BLE001
         raise ServeError(f"Could not read {rows_path}: {str(e)[:200]}") from None
     if rows.empty:
         raise ServeError(f"{rows_path} has no rows.")
     sent = rows.drop(columns=[target_col]) if target_col and target_col in rows.columns else rows
+    if features:
+        sent, scored = check_rows(sent, features)
+        if strict and scored.unseen:
+            raise ServeError(strict_error(rows, scored))
+    elif strict:
+        raise ServeError("--strict needs the model's features file, which is only available when the "
+                         "endpoint is a registered model's name; nothing was sent.")
+    else:
+        gaps = sent.isna()
+        scored = Scored(len(rows), missing={c: int(n) for c, n in gaps.sum().items() if n},
+                        missing_rows=int(gaps.any(axis=1).sum()))
     preds = predict_frame(url, sent, chunk=chunk)
     out = _prediction_frame(preds)
     if keep_columns:
         out = pd.concat([rows.reset_index(drop=True), out], axis=1)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
-    return len(rows)
+    return scored

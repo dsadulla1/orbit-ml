@@ -185,7 +185,7 @@ also reports a baseline, the best constant prediction for the metric, as a refer
 | `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
 | `orbit serve MODEL [--version N \| --alias NAME] [--port P]`, `orbit serve --list`, `orbit serve --stop NAME\|all` | Serve a registered model (`champion` by default) in a dedicated Docker container on 127.0.0.1 |
 | `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns] [--strict]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model); a model name also checks the CSV first, and `--strict` refuses text values not seen in training |
-| `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
+| `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and the time of the latest run |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
 
 `orbit <command> --help` lists every option.

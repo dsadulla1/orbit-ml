@@ -23,7 +23,7 @@ hash of the file) and the orbit version, and carries a short note, so attempts c
 Every experiment of the search is a nested child run with its parameters, score, per-fold scores,
 duration, tokens, peak memory and CPU, and artifacts (script, prompt, response, logs).
 
-`orbit experiments` lists the experiments with their number of runs and last update. An experiment
+`orbit experiments` lists the experiments with their number of runs and the time of the latest run. An experiment
 deleted in the MLflow UI is restored when its name is used again.
 
 ## Traces
@@ -40,7 +40,7 @@ for the run; the search carries on.
 
 The parent run records host system metrics (CPU, memory and, when the NVIDIA driver is reachable,
 GPU utilisation and memory) every 5 seconds, which is useful when a local LLM server shares the
-machine. Each experiment's run gets `peak_mem_mb` and `cpu_pct_mean`, the sandbox container's peak
+machine. Every GPU the host's driver exposes is recorded, including ones the model server does not use. Each experiment's run gets `peak_mem_mb` and `cpu_pct_mean`, the sandbox container's peak
 memory and mean CPU (100 = one busy core; for cross-validation the maximum and the mean over
 folds), sampled with `docker stats` from outside the container, so you can see which experiment
 was heavy or close to its memory limit. The HTML report shows peak memory per experiment. Set

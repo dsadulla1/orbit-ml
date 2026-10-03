@@ -18,9 +18,11 @@ is the default tracker; `--tracker auto|mlflow|wandb|none` overrides it per run,
 Each problem gets its own MLflow experiment, named after `--name` or the first data source (or set
 `--experiment NAME` / `ORBIT_EXPERIMENT`), so the runs inside it are comparable. Running the same
 problem again adds another run to the same experiment. Each parent run is tagged with its goal,
-evaluation wording, tables, target, metric, validation scheme, a data fingerprint (row count and a
-hash of the file) and the orbit version, and carries a short note, so attempts can be told apart.
-Every experiment of the search is a nested child run with its parameters, score, per-fold scores,
+evaluation wording, tables, target, metric, validation scheme, a data fingerprint (the number of labeled rows used,
+that is rows with a target value after any `--drop`, and a hash of the file), the dropped columns (`orbit.dropped`) and the orbit version, and carries a short note, so attempts can be told apart.
+The parent run also has two per-step metrics, `experiment_val_score` (the score of that experiment) and
+`best_val_score_so_far` (the running best), which draw the progress curve; `best_val_score` and
+`best_test_score` are the final winner's. Every experiment of the search is a nested child run with its parameters, score, per-fold scores,
 duration, tokens, peak memory and CPU, and artifacts (script, prompt, response, logs).
 
 `orbit experiments` lists the experiments with their number of runs and the time of the latest run. An experiment
@@ -66,6 +68,9 @@ the model's own checks, below, answer requests with a missing column), the featu
 sandbox's pinned library versions as its requirements; it needs those versions to load. Version tags record
 the run, experiment, metric, validation and test scores, baseline, goal, validation scheme and data
 fingerprint.
+
+Columns removed with `--drop` are not feature columns: they are not in the features file or the
+signature, so the endpoint does not ask for them (and ignores them if a request sends them anyway).
 
 The features file, `artifacts/orbit_features.json`, lists every feature column in order with its
 type (`number` or `text`; booleans count as text) and, for a text column, its distinct values in the

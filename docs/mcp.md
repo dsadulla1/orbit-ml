@@ -42,7 +42,7 @@ claude mcp add mlflow --env MLFLOW_TRACKING_URI=http://localhost:5000 --env MLFL
 | MLflow object | Contents |
 |---|---|
 | Experiment `orbit` | All orbit runs |
-| Parent run (named after the run folder) | params: dataset, target, metric, model, budgets; metrics: `baseline`, per-step `val_score`, `best_val_score`, `best_test_score`; tags: `orbit.best_experiment`, `orbit.stop_reason`; artifacts: `data_profile.txt`, `journal.json`, `report.md` |
+| Parent run (named after the run folder) | params: dataset, target, metric, model, budgets; metrics: `baseline`, per-step `experiment_val_score` and `best_val_score_so_far`, `best_val_score`, `best_test_score`; tags: `orbit.best_experiment`, `orbit.stop_reason`; artifacts: `data_profile.txt`, `journal.json`, `report.md` |
 | Nested run `exp-NNN-<stage>` | params: `stage`, `parent`, `debug_depth`; metrics: `val_score`, `duration_s`, tokens; tags: `orbit.plan`, `orbit.status`; artifacts: `solution.py`, `prompt.md`, `response.md`, `stdout.txt`, `stderr.txt` |
 
 Useful prompts once connected:

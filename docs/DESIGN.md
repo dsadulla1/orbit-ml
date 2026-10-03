@@ -27,7 +27,7 @@
 | `registry.py` | Log the exported model to MLflow, register a version, set tags, description and the `champion` alias |
 | `serve.py` | Command builders and parsers behind `orbit serve` and `orbit predict`: model URIs, the serving container's `docker run`, Compose network discovery, readiness polling, listing and stopping, the CSV scoring client |
 | `tracking.py` | MLflow / W&B logging (failures are logged, never fatal) |
-| `report.py` | Facts → narrative → review (numbers and counts) → revise or fall back to the template → `report.md` |
+| `report.py` | Facts → narrative → review (numbers, counts, and the gain against the fold spread) → revise or fall back to the template → `report.md` |
 | `results.py` | One JSON-friendly summary of a run, from the run folder or from an MLflow server |
 | `html_report.py` | Standalone `report.html` (Jinja, inline SVG charts, no scripts or external assets) |
 | `cli.py` | `explore` (same sources as `run`), `run`, `export`, `models`, `serve`, `predict`, `results`, `compare`, `experiments`, `summarize`, `doctor` |
@@ -43,12 +43,21 @@ data.csv ──split──► test (20%)  ────────────�
 ```
 
 Next to every `train.csv` / `test.csv` pair orbit also writes `orbit_meta.json` (target, task kind,
-metric, positive label, class names, id and time columns, fold count, extra table names) and
+metric, positive label, class names, id and time columns, fold count, extra table names, names of
+dropped columns) and
 `orbit_helpers.py` (a copy of `helpers.py`); `extra/` holds additional tables when there are any.
 
 Datasets of up to about 10,000 development rows use 5-fold cross-validation (`--folds N` to
 change it); larger ones use a single 60/20/20 train / validation / test split (`--folds 1`),
 laid out as `input/train.csv` and `input/test.csv`.
+
+`--drop COL` (`TaskSpec.drop`) is applied in `load_labeled`, the one place that reads the primary
+table: after the time ordering (so a dropped time column still orders the rows) and before
+anything is written or described. Every fold's files, the profile, split statistics, baselines,
+setup hints, the export input (and so the features file and the served endpoint) are built from
+that frame. Names are checked against the table's columns; the target and the id column cannot be
+dropped. Extra tables are untouched. The names go to `spec.notes`, the `orbit.dropped` tag and
+the prompt (they must not be recreated); no values are involved.
 
 With `--time-col COL` the rows are stably sorted by that column (parsed as dates, or used as
 numbers) and nothing is shuffled: the latest `test_size` share is the test split. A single split
@@ -116,6 +125,11 @@ repeating ideas. The search stops at the step, time or token budget, optionally 
 clear improvement by more than that experiment's fold spread, the sample standard deviation of its
 fold scores, or 0 for a single split; several small gains therefore add up), after three consecutive
 LLM/infrastructure errors, or on Ctrl-C. The best result so far is always scored and reported.
+
+The time limit (`--timeout`, `ORBIT_SANDBOX_TIMEOUT`) is for one experiment: its folds share it, and
+each fold's run gets `max(30, limit // folds)` seconds (a single split gets all of it). The system
+prompt states that per-run limit. A fold that exceeds it fails the experiment with the usual
+timeout message, which names the limit. The export runs once and keeps the full limit.
 
 ## Response protocol
 
@@ -292,10 +306,12 @@ flag is set.
   re-running a problem adds a parent run to the same experiment. If an experiment of that name was
   deleted earlier, the tracker restores it and retries once instead of disabling tracking. One parent run per orbit run; one nested run per experiment with
   params (stage, parent, debug depth), metrics (val score, duration, tokens) and artifacts (script,
-  prompt, response, logs). The parent run gets the per-step score curve, the best
-  validation and test scores, `journal.json` and `report.md`. It is tagged `orbit.goal`,
+  prompt, response, logs). The parent run gets two per-step curves, `experiment_val_score` (that
+  experiment's score) and `best_val_score_so_far` (the running best, by the metric's direction),
+  the final `best_val_score` and `best_test_score`, `journal.json` and `report.md`. It is tagged `orbit.goal`,
   `orbit.eval`, `orbit.primary_table`, `orbit.extra_tables`, `orbit.target`, `orbit.metric`,
-  `orbit.validation`, `orbit.data_fingerprint` (rows and a sha256 prefix of the primary table),
+  `orbit.validation`, `orbit.data_fingerprint` (the number of labeled rows used and a sha256 prefix of the source file),
+  `orbit.dropped` (when `--drop` is used),
   `orbit.version`, and carries a Markdown note (`mlflow.note.content`). `tracking.json` in the run
   folder records the URI, experiment name and id, and run id.
 - **Traces** (MLflow): one trace per search step, in the problem's experiment. The root span

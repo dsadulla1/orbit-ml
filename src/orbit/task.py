@@ -11,14 +11,16 @@ fold's directory is mounted, so a script never sees another fold's labels:
 
     input/fold_1/train.csv, input/fold_1/test.csv   ... input/fold_k/...
 
-With `time_col` the rows are ordered by that column instead of being shuffled: the test rows are the
-latest ones, and fold i trains on every row before its validation block (an expanding window).
+With `time_col` the rows are ordered by that column instead of being shuffled, and with `time_order`
+the file order itself is taken as time (no column is added): the test rows are the latest ones, and
+fold i trains on every row before its validation block (an expanding window).
 
 Each fold's test.csv holds that fold's validation rows plus all test rows. The agent cannot tell
 which unlabeled rows are validation (used to rank experiments during search) and which are test
 (scored once, for the final best experiment, from the average of the k fold predictions).
 """
 import json
+import re
 import warnings
 from importlib import resources
 from dataclasses import asdict, dataclass, field
@@ -56,6 +58,7 @@ class TaskSpec:
     id_column: str | None = None                      # identifies rows; not a feature
     notes: list[str] = field(default_factory=list)    # how the task was set up
     time_col: str | None = None                       # order rows by this column; validate on later rows
+    time_order: bool = False                          # the rows are already in time order (file order)
 
 
 @dataclass
@@ -72,6 +75,8 @@ class Task:
     n_folds: int = 1
     extra_profile: str = ""   # description of the additional tables
     docs_text: str = ""       # documentation shown to the model
+    split_stats: dict = field(default_factory=dict)   # row counts and target rates per split
+    test_baseline: float | None = None                # the baseline score on the test split
 
     @property
     def metric(self) -> Metric:
@@ -177,6 +182,118 @@ def _best_constant(metric: Metric, y: pd.Series) -> float:
     return float(y.mean())
 
 
+def _split_stat(y: pd.Series, kind: str, classes: list, positive: str | None) -> dict:
+    """Row count plus the target distribution of one split: class shares (and the positive share for
+    a binary target) or the mean and standard deviation. Plain numbers only, so it stores as JSON."""
+    out = {"rows": int(len(y))}
+    if kind == "classification":
+        shares = y.astype(str).value_counts(normalize=True)
+        out["shares"] = {c: round(float(shares.get(c, 0.0)), 6) for c in classes}
+        if positive is not None:
+            out["positive_rate"] = out["shares"][positive]
+    else:
+        out["mean"] = float(y.astype(float).mean())
+        out["std"] = float(y.astype(float).std(ddof=0))
+    return out
+
+
+def _split_stats(parts: list, target: str, kind: str, classes: list, positive: str | None) -> dict:
+    """Per-split statistics from what `prepare` already holds: the training rows (of the last fold,
+    the one with the most history), each validation fold and the test split. Labels stay on the
+    orchestrator side; nothing here is written into a sandbox input directory."""
+    stat = lambda frame: _split_stat(frame[target], kind, classes, positive)
+    return {"positive": positive, "train": stat(parts[-1][0]),
+            "val": [{"fold": k, **stat(v)} for k, (_, v, _) in enumerate(parts, 1)],
+            "test": stat(parts[0][2])}
+
+
+def _test_baseline(metric: Metric, parts: list, target: str, positive_label) -> float | None:
+    """The baseline score on the test split: the same best constant as the validation baseline,
+    fitted on each fold's training rows, averaged over the folds. None when it cannot be scored
+    (for instance a test split with a single class under an AUC metric)."""
+    try:
+        value = float(np.mean([_baseline(metric, tr[target], te[target], positive_label)
+                               for tr, _, te in parts]))
+    except ValueError:
+        return None
+    return value if np.isfinite(value) else None
+
+
+HINT_MIN_ROWS = 500          # smaller files are too noisy to say anything about
+HINT_BLOCKS = 5
+_DATE_NUMBER_NAME = re.compile(r"date|time|year", re.IGNORECASE)  # numeric columns need a clearer name
+
+
+def _looks_like_date(name: str, s: pd.Series) -> bool:
+    """A datetime column, a numeric column with a clear date-like name (`pdays` does not qualify), or
+    text that parses as dates with real variety. Month and weekday names do not qualify, and constant or
+    two-valued columns never do."""
+    if s.nunique() < 3:
+        return False
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return True
+    if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
+        return bool(_DATE_NUMBER_NAME.search(name))
+    values = s.dropna().astype(str)
+    sample = values.sample(n=min(2000, len(values)), random_state=0)
+    if pd.to_numeric(sample, errors="coerce").notna().mean() >= 0.95:
+        return False  # numbers written as text are not dates
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(sample, errors="coerce")
+    if parsed.notna().mean() < 0.95:
+        return False
+    # Month or weekday names ("may", "tue") parse too but cannot order rows: real dates vary by day
+    # or span several years.
+    parsed = parsed.dropna()
+    return bool(parsed.nunique() >= 20 or parsed.dt.year.nunique() >= 2)
+
+
+def setup_hints(df: pd.DataFrame, spec: TaskSpec, kind: str, classes: list) -> list[str]:
+    """Non-blocking notes for data in file order, for the reader of the run (they go to `spec.notes`):
+    a column that looks like a date, and a target whose rate or mean drifts along the file. Both
+    mean a random validation split is optimistic for later periods. Silent for fewer than
+    HINT_MIN_ROWS rows and for shuffled data."""
+    if len(df) < HINT_MIN_ROWS:
+        return []
+    hints = []
+    skip = {spec.target, ID_COL, spec.id_column}
+    for col in [c for c in df.columns if c not in skip][:200]:
+        if _looks_like_date(str(col), df[col]):
+            hints.append(f"column {str(col)!r} looks like a date or time: validation here is random, "
+                         f"so scores are optimistic if you will predict later periods; use "
+                         f"--time-col {col} to validate on later rows")
+            if len(hints) == 2:
+                break
+    y = df[spec.target]
+    blocks = np.array_split(np.arange(len(df)), HINT_BLOCKS)
+    if kind == "classification" and len(classes) == 2:
+        positive = str(y.astype(str).value_counts().idxmin())
+        hit = (y.astype(str) == positive).to_numpy(dtype=float)
+        rates = [hit[b].mean() for b in blocks]
+        m = min(len(b) for b in blocks)
+        pooled = float(hit.mean())
+        lo, hi = min(rates), max(rates)
+        # A factor of 2 and 0.05 are not enough for rare classes in small blocks, where chance alone
+        # moves the rate; the gap must also be several standard errors wide.
+        se = np.sqrt(pooled * (1 - pooled) * 2 / m)
+        drift = (hi - lo > 0.05 and hi > 2 * lo and se > 0 and (hi - lo) / se > 4)
+        first, last, noun = f"{rates[0]:.1%}", f"{rates[-1]:.1%}", "rate"
+    elif kind == "regression":
+        values = y.astype(float).to_numpy()
+        means = [values[b].mean() for b in blocks]
+        std = float(values.std(ddof=1))
+        drift = bool(np.isfinite(std) and std > 0 and max(means) - min(means) > std)
+        first, last, noun = f"{means[0]:.4g}", f"{means[-1]:.4g}", "mean"
+    else:
+        drift = False
+    if drift:
+        hints.append(f"the target {noun} changes along the file (first fifth {first}, last fifth "
+                     f"{last}): if the rows are in time order use --time-order, otherwise shuffle the "
+                     "file; random validation will be optimistic for later periods")
+    return hints
+
+
 def _split(df: pd.DataFrame, target: str, kind: str, size: float, seed: int):
     """Stratified split for classification; plain split when a class is too rare to stratify."""
     if kind == "classification":
@@ -231,7 +348,10 @@ def _time_split(df: pd.DataFrame, spec: TaskSpec):
 
 def load_labeled(spec: TaskSpec) -> pd.DataFrame:
     """Every row of the primary table that has a target value, as `prepare` splits them: ordered by
-    `time_col` when set, and integer targets restored (missing values make pandas read 0/1 as floats)."""
+    `time_col` when set (with `time_order` the file order is kept), and integer targets restored
+    (missing values make pandas read 0/1 as floats)."""
+    if spec.time_col and spec.time_order:
+        raise ValueError("Use either a time column or --time-order, not both.")
     df = read_table(Path(spec.data_path))
     if spec.target not in df.columns:
         raise ValueError(f"Target column {spec.target!r} not found. Columns: {list(df.columns)}")
@@ -272,8 +392,15 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     if spec.folds is not None and spec.folds < 1:
         raise ValueError("folds must be at least 1.")
     n_folds = spec.folds or (AUTO_FOLDS if len(df) * (1 - spec.test_size) <= AUTO_CV_MAX_ROWS else 1)
+    ordered = bool(spec.time_col or spec.time_order)  # later rows are validated on earlier ones
+    hints = []
+    if spec.folds is None and n_folds == 1:
+        hints.append(f"single validation split (more than {AUTO_CV_MAX_ROWS:,} rows); --folds 5 "
+                     "adds a spread at five times the sandbox cost")
+    if not ordered:
+        hints += setup_hints(df, spec, kind, classes)
 
-    if n_folds > 1 and kind == "classification" and not spec.time_col:
+    if n_folds > 1 and kind == "classification" and not ordered:
         # Stratified folds need every class in every fold; the test split takes its share first.
         usable = int(int(y.astype(str).value_counts().min()) * (1 - spec.test_size))
         if usable < n_folds:
@@ -287,7 +414,7 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     features = [c for c in df.columns if c != spec.target]
 
     if n_folds == 1:
-        if spec.time_col:
+        if ordered:
             train, val, test = _time_split(df, spec)
         else:
             holdout = spec.val_size + spec.test_size
@@ -298,7 +425,7 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
         val_rows, test_rows = [val.assign(_fold=1)], test.assign(_fold=0)
         profile_df = train
     else:
-        if spec.time_col:
+        if ordered:
             n_test = max(1, round(len(df) * spec.test_size))
             dev, test = df.iloc[:len(df) - n_test], df.iloc[len(df) - n_test:]
             if len(dev) < 2 * (n_folds + 1):
@@ -352,11 +479,14 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     if not np.isfinite(baseline):
         raise ValueError(f"The baseline {metric_name} score is not finite; the target may be constant "
                          "in a validation fold. Check the target column.")
+    spec.notes.extend(hints)
+    positive = str(y.astype(str).value_counts().idxmin()) if len(classes) == 2 else None
     task = Task(
         spec=spec, run_dir=run_dir, kind=kind, metric_name=metric_name,
         positive_label=positive_label, classes=classes, n_train=len(parts[0][0]),
         profile=profile(profile_df, spec.target), baseline=baseline,
-        n_folds=n_folds,
+        n_folds=n_folds, test_baseline=_test_baseline(metric, parts, spec.target, positive_label),
+        split_stats=_split_stats(parts, spec.target, kind, classes, positive),
         extra_profile="\n\n".join(describe_table(Path(n), f, title=f"data/extra/{n}.csv") for n, f in extras.items()),
         docs_text=read_docs([Path(p) for p in spec.docs]),
     )

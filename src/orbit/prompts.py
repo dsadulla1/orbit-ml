@@ -214,6 +214,10 @@ def data_section(task, export: bool = False) -> str:
             f"Validation and test rows are later in time (column {task.spec.time_col!r}) than the "
             f"training rows of the same run, so features must not rely on information from after a "
             f"row's own time.")
+    if task.spec.time_order and not export:
+        scoring = (scoring + " " if scoring else "") + (
+            "Validation and test rows come later in the file than the training rows; features must "
+            "not use information from later rows.")
     extras = ""
     if task.spec.id_column:
         extras += (f"\n\nColumn {task.spec.id_column!r} only identifies rows; do not use it as a "

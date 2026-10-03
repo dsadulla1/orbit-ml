@@ -256,7 +256,7 @@ def test_classification_meta_lists_class_names_only(clf_csv, tmp_path):
     assert meta["classes"] == ["no", "yes"] and meta["positive_label"] == "yes"
     assert meta["needs_proba"] is True and meta["needs_nonneg"] is False
     assert set(meta) == {"target", "kind", "metric", "needs_proba", "needs_nonneg", "positive_label",
-                         "classes", "id_column", "time_col", "n_folds", "extra_names"}
+                         "classes", "id_column", "time_col", "n_folds", "extra_names", "dropped"}
 
 
 def test_prepare_writes_meta_and_helper_into_every_fold(clf_csv, tmp_path):

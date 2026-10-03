@@ -19,6 +19,7 @@ Each fold's test.csv holds that fold's validation rows plus all test rows. The a
 which unlabeled rows are validation (used to rank experiments during search) and which are test
 (scored once, for the final best experiment, from the average of the k fold predictions).
 """
+import difflib
 import json
 import re
 import warnings
@@ -59,6 +60,7 @@ class TaskSpec:
     notes: list[str] = field(default_factory=list)    # how the task was set up
     time_col: str | None = None                       # order rows by this column; validate on later rows
     time_order: bool = False                          # the rows are already in time order (file order)
+    drop: list[str] = field(default_factory=list)     # columns of the primary table removed everywhere
 
 
 @dataclass
@@ -346,6 +348,36 @@ def _time_split(df: pd.DataFrame, spec: TaskSpec):
     return df.iloc[:n_train], df.iloc[n_train:n_train + n_val], df.iloc[n_train + n_val:]
 
 
+def parse_drop(values: list[str] | None) -> list[str]:
+    """Column names from repeated and comma separated `--drop` values: stripped, without empty
+    entries or repeats, in the order given."""
+    out: list[str] = []
+    for value in values or []:
+        for name in str(value).split(","):
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def _check_drop(df: pd.DataFrame, spec: TaskSpec) -> None:
+    """Every dropped name must be a column of the primary table (exact spelling). The target and the
+    id column cannot go; the time column can: it orders the rows and is then removed."""
+    columns = [str(c) for c in df.columns]
+    for name in spec.drop:
+        if name == spec.target:
+            raise ValueError(f"--drop {name!r}: that is the target column and cannot be dropped.")
+        if spec.id_column and name == spec.id_column:
+            raise ValueError(f"--drop {name!r}: that is the id column, which identifies rows and is "
+                             "not used as a feature anyway; it cannot be dropped.")
+        if name not in columns:
+            close = difflib.get_close_matches(name, columns, n=3, cutoff=0.5)
+            hint = f" Did you mean {', '.join(map(repr, close))}?" if close else ""
+            shown = ", ".join(columns[:60]) + (f", ... ({len(columns)} columns)" if len(columns) > 60 else "")
+            raise ValueError(f"--drop {name!r}: no such column in {Path(spec.data_path).name}.{hint} "
+                             f"Columns: {shown}")
+
+
 def load_labeled(spec: TaskSpec) -> pd.DataFrame:
     """Every row of the primary table that has a target value, as `prepare` splits them: ordered by
     `time_col` when set (with `time_order` the file order is kept), and integer targets restored
@@ -358,8 +390,11 @@ def load_labeled(spec: TaskSpec) -> pd.DataFrame:
     if ID_COL in df.columns:
         raise ValueError(f"Column name {ID_COL!r} is reserved by orbit; please rename it.")
     df = df[df[spec.target].notna()].reset_index(drop=True)
+    _check_drop(df, spec)
     if spec.time_col:
         df = _order_by_time(df, spec)
+    if spec.drop:
+        df = df.drop(columns=spec.drop)
     y = df[spec.target]
     if pd.api.types.is_float_dtype(y) and (y == y.round()).all():
         df[spec.target] = y.astype("int64")
@@ -394,6 +429,8 @@ def prepare(spec: TaskSpec, run_dir: Path) -> Task:
     n_folds = spec.folds or (AUTO_FOLDS if len(df) * (1 - spec.test_size) <= AUTO_CV_MAX_ROWS else 1)
     ordered = bool(spec.time_col or spec.time_order)  # later rows are validated on earlier ones
     hints = []
+    if spec.drop:
+        spec.notes.append(f"dropped columns: {', '.join(spec.drop)} (as requested)")
     if spec.folds is None and n_folds == 1:
         hints.append(f"single validation split (more than {AUTO_CV_MAX_ROWS:,} rows); --folds 5 "
                      "adds a spread at five times the sandbox cost")
@@ -532,7 +569,7 @@ def _write_helper_files(out: Path, spec: TaskSpec, kind: str, metric: Metric, po
             "needs_proba": metric.needs_proba, "needs_nonneg": metric.needs_nonneg,
             "positive_label": positive_label, "classes": classes[:META_MAX_CLASSES],
             "id_column": spec.id_column, "time_col": spec.time_col, "n_folds": n_folds,
-            "extra_names": extra_names}
+            "extra_names": extra_names, "dropped": list(spec.drop)}
     (out / META_FILE).write_text(json.dumps(meta, indent=2))
     (out / HELPER_FILE).write_text(resources.files("orbit").joinpath("helpers.py").read_text("utf-8"))
 

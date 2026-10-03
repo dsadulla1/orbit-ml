@@ -262,7 +262,8 @@ def load_for_profile(path: Path, max_rows: int | None = None, seed: int = 0) -> 
 
 
 def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40, title: str | None = None,
-                   total_rows: int | None = None, sampled: bool = False) -> str:
+                   total_rows: int | None = None, sampled: bool = False,
+                   dropped: list[str] | None = None) -> str:
     shown = f"{len(df):,}"
     if sampled and total_rows:
         shown = f"random sample of {len(df):,} of {total_rows:,}"
@@ -271,7 +272,8 @@ def describe_table(path: Path, df: pd.DataFrame, max_cols: int = 40, title: str 
     for c in list(df.columns)[:max_cols]:
         s = df[c]
         ex = ", ".join(map(str, s.dropna().unique()[:3]))[:60]
-        lines.append(f"{c} | {s.dtype} | {100 * s.isna().mean():.0f} | {ex}")
+        lines.append(f"{c} | {s.dtype} | {100 * s.isna().mean():.0f} | {ex}"
+                     + ("  (dropped)" if c in (dropped or ()) else ""))
     if df.shape[1] > max_cols:
         lines.append(f"... and {df.shape[1] - max_cols} more columns")
     return "\n".join(lines)

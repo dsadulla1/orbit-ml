@@ -224,7 +224,19 @@ def prediction_rule(task) -> str:
     return rule
 
 
+MIN_RUN_SECONDS = 30  # the shortest limit one run of a cross-validated experiment gets
+
+
+def run_timeout(exec_timeout: int, n_folds: int) -> int:
+    """Seconds one run of the script may take. `exec_timeout` is the limit for a whole experiment:
+    its folds share it, but none gets less than MIN_RUN_SECONDS."""
+    if n_folds <= 1:
+        return exec_timeout
+    return max(MIN_RUN_SECONDS, exec_timeout // n_folds)
+
+
 def system_prompt(task, timeout: int, cpus: float) -> str:
+    """`timeout` is the limit for one run of the script (see `run_timeout`)."""
     return SYSTEM.format(libraries=LIBRARIES, target=task.spec.target, id_col=ID_COL,
                          pred_col=PRED_COL, prediction_rule=prediction_rule(task),
                          timeout=timeout, cpus=max(1, int(cpus)))
@@ -237,11 +249,13 @@ def data_section(task, export: bool = False) -> str:
     if task.n_folds > 1 and not export:
         scoring = (f"Scoring: your script is run {task.n_folds} times, each on a different "
                    f"train/test split of the same data (data/train.csv and data/test.csv change "
-                   f"between runs); the score is the mean over the runs. Do not hard-code row "
-                   f"counts or ids.")
+                   f"between runs); the score is the mean over the runs, and each run has its own "
+                   f"time limit (see the rules). Do not hard-code row counts or ids.")
     if task.spec.time_col and not export:
+        when = ("" if task.spec.time_col in task.spec.drop
+                else f" (column {task.spec.time_col!r})")  # a dropped column is not in the data
         scoring = (scoring + " " if scoring else "") + (
-            f"Validation and test rows are later in time (column {task.spec.time_col!r}) than the "
+            f"Validation and test rows are later in time{when} than the "
             f"training rows of the same run, so features must not rely on information from after a "
             f"row's own time.")
     if task.spec.time_order and not export:
@@ -252,6 +266,9 @@ def data_section(task, export: bool = False) -> str:
     if task.spec.id_column:
         extras += (f"\n\nColumn {task.spec.id_column!r} only identifies rows; do not use it as a "
                    f"feature.")
+    if task.spec.drop:
+        extras += ("\n\nThe user removed these columns; they are not available and must not be "
+                   f"recreated: {', '.join(task.spec.drop)}.")
     if task.extra_profile:
         extras += ("\n\n## Additional tables (read-only CSV files under data/extra/; join them to "
                    "the training data when they help)\n" + task.extra_profile)

@@ -25,7 +25,11 @@ MAX_NOTES = 10  # skipped-file notes kept per run; the rest are only counted
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 200
-MAX_DEPTH = 3
+MAX_DEPTH = 6  # folders below the source root (archives do not count as a level)
+MAX_ARCHIVE_DEPTH = 6  # zips inside zips
+MAX_ARCHIVES = 20  # archives unpacked per `resolve` call, nested ones included
+# Operating-system leftovers that are ignored without a note.
+JUNK_NAMES = {"__macosx", ".ds_store", "thumbs.db", "desktop.ini"}
 # Folders never copied from a source directory: earlier orbit runs (their hidden labels must not
 # become an input table), tracker output and tooling.
 SKIP_DIRS = {"runs", "hidden", "mlruns", "wandb", "__pycache__", "node_modules", "venv"}
@@ -47,6 +51,8 @@ class Resolved:
     notes: list[str] = field(default_factory=list)
     skipped: int = 0  # files skipped so far (only the first few get a note)
     converted_bytes: int = 0  # CSV written from Excel sheets
+    archives: int = 0  # zip files unpacked so far, nested ones included
+    unzipped_bytes: int = 0  # bytes extracted from all of them
 
 
 def is_url(source: str) -> bool:
@@ -68,6 +74,10 @@ def _kind(path: Path) -> str | None:
     if name.endswith(".xls"):
         return "xls"
     return None
+
+
+def _is_junk(name: str) -> bool:
+    return name.lower() in JUNK_NAMES
 
 
 def _skip(out: Resolved, name: str, why: str) -> None:
@@ -117,24 +127,50 @@ def download(url: str, dest_dir: Path, max_bytes: int = MAX_DOWNLOAD_BYTES, time
     return path
 
 
-def _unzip(archive: Path, dest: Path, max_bytes: int = MAX_UNZIPPED_BYTES) -> Path:
-    """Extract only regular files whose names stay inside `dest`; refuse oversized archives."""
-    out = dest / archive.stem
-    out.mkdir(parents=True, exist_ok=True)
+def _unzip(archive: Path, dest: Path, max_bytes: int | None = None, out: Resolved | None = None) -> Path:
+    """Extract only regular files whose names stay inside `dest`; refuse oversized archives.
+
+    `max_bytes` caps this archive; when `out` is given its running totals also cap the number of
+    archives and the bytes extracted across all of them (a zip inside a zip must not slip past)."""
+    max_bytes = MAX_UNZIPPED_BYTES if max_bytes is None else max_bytes
+    if out is not None and out.archives >= MAX_ARCHIVES:
+        raise SourceError(f"{archive.name}: more than {MAX_ARCHIVES} zip files to unpack in one go; "
+                          "unzip them yourself and pass the folder with the files you need")
+    stem, n = archive.stem, 2
+    out_dir = dest / stem
+    while out_dir.exists():  # two archives with the same name must not merge
+        out_dir, n = dest / f"{stem}_{n}", n + 1
+    out_dir.mkdir(parents=True)
     with zipfile.ZipFile(archive) as z:
-        infos = [i for i in z.infolist() if not i.is_dir()]
-        if len(infos) > MAX_FILES or sum(i.file_size for i in infos) > max_bytes:
+        infos = [i for i in z.infolist() if not i.is_dir()
+                 and not any(_is_junk(part) for part in Path(i.filename).parts)]
+        size = sum(i.file_size for i in infos)
+        if len(infos) > MAX_FILES or size > max_bytes:
             raise SourceError(f"{archive.name}: too many or too large files to extract")
+        used = out.unzipped_bytes if out is not None else 0
+        if used + size > MAX_UNZIPPED_BYTES:
+            raise SourceError(f"{archive.name}: the archives together expand to more than "
+                              f"{MAX_UNZIPPED_BYTES / 1e9:.1f} GB; unzip them yourself and pass the folder "
+                              "with the files you need")
+        if out is not None:
+            out.archives += 1
         for info in infos:
-            target = (out / info.filename).resolve()
-            if not target.is_relative_to(out.resolve()):
+            target = (out_dir / info.filename).resolve()
+            if not target.is_relative_to(out_dir.resolve()):
                 raise SourceError(f"{archive.name}: unsafe path {info.filename!r} in archive")
             if (info.external_attr >> 16) & 0o170000 == 0o120000:  # symlink entry
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
             with z.open(info) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-    return out
+                while chunk := src.read(1 << 20):
+                    written += len(chunk)
+                    if written > info.file_size:  # the header understated the size
+                        raise SourceError(f"{archive.name}: {info.filename!r} is larger than the archive says")
+                    dst.write(chunk)
+            if out is not None:
+                out.unzipped_bytes += written
+    return out_dir
 
 
 def _convert_workbook(path: Path, out: Resolved) -> list[Path]:
@@ -179,18 +215,26 @@ def _convert_workbook(path: Path, out: Resolved) -> list[Path]:
     return tables
 
 
-def _collect(path: Path, dest: Path, out: Resolved, depth: int = 0) -> None:
+def _collect(path: Path, dest: Path, out: Resolved, depth: int = 0, nesting: int = 0) -> None:
+    """`depth` counts folders below the source root, `nesting` the zip files we are inside of."""
+    if _is_junk(path.name):
+        return
     if path.is_dir():
         if depth > MAX_DEPTH:
-            _skip(out, f"{path.name}/", f"nested more than {MAX_DEPTH} levels deep")
+            _skip(out, f"{path.name}/", f"folders are nested more than {MAX_DEPTH} levels deep; "
+                                        "pass the inner folder directly")
             return
         for child in sorted(path.iterdir()):
             if not child.name.startswith("."):
-                _collect(child, dest, out, depth + 1)
+                _collect(child, dest, out, depth + 1, nesting)
         return
     kind = _kind(path)
     if kind == "zip":
-        _collect(_unzip(path, dest), dest, out, depth + 1)
+        if nesting >= MAX_ARCHIVE_DEPTH:
+            _skip(out, path.name, f"zip files are nested more than {MAX_ARCHIVE_DEPTH} deep; "
+                                  "unzip it and pass the folder")
+            return
+        _collect(_unzip(path, dest, out=out), dest, out, depth, nesting + 1)
     elif kind == "table":
         out.tables.append(path)
     elif kind == "xlsx":
@@ -258,6 +302,8 @@ def _copy_tree(src: Path, dst: Path, avoid: Path | None = None, out: Resolved | 
         if (avoid and p.resolve().is_relative_to(avoid)) or any(r in p.parents for r in runs):
             continue
         if len(rel.parts) > MAX_DEPTH + 1 and p.is_file():
+            continue
+        if any(_is_junk(part) for part in rel.parts):
             continue
         if p.is_file() and _kind(p) is None and out is not None:
             _skip(out, p.name, "unsupported file type")

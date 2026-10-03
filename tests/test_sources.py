@@ -196,3 +196,101 @@ def test_no_table_error_says_what_was_found(tmp_path):
     msg = str(e.value)
     assert "model.pkl: unsupported file type" in msg and "old.xls" in msg and "1 text document" in msg
     assert "xlsx" in msg
+
+
+def _zip_of(path, files):
+    """files: {name: bytes | str | Path}; a Path value is added as a file under that name."""
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in files.items():
+            if hasattr(data, "read_bytes"):
+                z.writestr(name, data.read_bytes())
+            else:
+                z.writestr(name, data)
+    return path
+
+
+def _nested(tmp_path, levels, leaf="a,b\n1,2\n"):
+    """A zip nested `levels` deep with one table at the bottom."""
+    inner = _zip_of(tmp_path / "level0.zip", {"deep.csv": leaf})
+    for i in range(1, levels):
+        inner = _zip_of(tmp_path / f"level{i}.zip", {f"level{i - 1}.zip": inner})
+    return inner
+
+
+def test_nested_zips_with_folders_are_followed(tmp_path):
+    row = "age;job;y\n1;a;no\n2;b;yes\n"
+    bank = _zip_of(tmp_path / "bank.zip", {"bank.csv": row, "bank-full.csv": row, "bank-names.txt": "names"})
+    add = _zip_of(tmp_path / "bank-additional.zip", {
+        "bank-additional/bank-additional-full.csv": row, "bank-additional/bank-additional.csv": row,
+        "bank-additional/bank-additional-names.txt": "names"})
+    outer = _zip_of(tmp_path / "bank+marketing.zip", {"bank.zip": bank, "bank-additional.zip": add,
+                                                       "__MACOSX/._bank.zip": "junk", "__MACOSX/x/Thumbs.db": "j"})
+    r = resolve([str(outer)], tmp_path / "run" / "source")
+    assert sorted(p.name for p in r.tables) == ["bank-additional-full.csv", "bank-additional.csv",
+                                                "bank-full.csv", "bank.csv"]
+    assert sorted(p.name for p in r.docs) == ["bank-additional-names.txt", "bank-names.txt"]
+    assert r.notes == [] and r.skipped == 0 and r.archives == 3 and r.unzipped_bytes > 0
+
+
+def test_junk_files_are_ignored_quietly(tmp_path):
+    d = tmp_path / "d"
+    _write(d / "train.csv"); _write(d / "__MACOSX" / "train.csv"); _write(d / "Thumbs.db", "x")
+    _write(d / ".DS_Store", "x")
+    r = resolve([str(d)], tmp_path / "src")
+    assert [p.name for p in r.tables] == ["train.csv"] and r.notes == []
+
+
+def test_nesting_beyond_the_limit_is_explained(tmp_path, monkeypatch):
+    monkeypatch.setattr(sources, "MAX_ARCHIVE_DEPTH", 2)
+    top = _nested(tmp_path, 4)
+    _write(tmp_path / "ok" / "ok.csv")
+    r = resolve([str(top), str(tmp_path / "ok" / "ok.csv")], tmp_path / "run" / "source")
+    assert [p.name for p in r.tables] == ["ok.csv"]
+    assert any("zip files are nested more than 2 deep; unzip it and pass the folder" in n for n in r.notes)
+
+
+def test_deep_folders_are_explained(tmp_path):
+    d = tmp_path / "d"
+    _write(d / "top.csv")
+    _write(d.joinpath(*"abcdefgh") / "deep.csv")
+    r = resolve([str(d)], tmp_path / "src")
+    assert "top.csv" in [p.name for p in r.tables]
+    assert "deep.csv" not in [p.name for p in r.tables]
+
+
+def test_four_levels_of_zips_resolve_by_default(tmp_path):
+    r = resolve([str(_nested(tmp_path, 4))], tmp_path / "run" / "source")
+    assert [p.name for p in r.tables] == ["deep.csv"] and r.archives == 4
+
+
+def test_archive_count_budget_stops_a_nested_bomb(tmp_path, monkeypatch):
+    monkeypatch.setattr(sources, "MAX_ARCHIVES", 3)
+    with pytest.raises(SourceError, match="more than 3 zip files"):
+        resolve([str(_nested(tmp_path, 5))], tmp_path / "run" / "source")
+
+
+def test_total_size_budget_spans_all_archives(tmp_path, monkeypatch):
+    big = "a,b\n" + "1,2\n" * 300
+    inners = {f"p{i}.zip": _zip_of(tmp_path / f"p{i}.zip", {f"t{i}.csv": big}) for i in range(4)}
+    outer = _zip_of(tmp_path / "all.zip", inners)
+    outer_bytes = sum(p.stat().st_size for p in inners.values())
+    # each inner archive fits on its own; the third one pushes the running total over the budget
+    monkeypatch.setattr(sources, "MAX_UNZIPPED_BYTES", outer_bytes + 2 * len(big) + 10)
+    with pytest.raises(SourceError, match="archives together expand to more than"):
+        resolve([str(outer)], tmp_path / "run" / "source")
+
+
+def test_zip_slip_inside_a_nested_zip_is_rejected(tmp_path):
+    bad = _zip_of(tmp_path / "bad.zip", {"../../escape.csv": "a,b\n1,2\n"})
+    outer = _zip_of(tmp_path / "outer.zip", {"ok.csv": "a,b\n1,2\n", "bad.zip": bad})
+    with pytest.raises(SourceError, match="unsafe path"):
+        resolve([str(outer)], tmp_path / "run" / "source")
+    assert not (tmp_path / "run" / "escape.csv").exists() and not (tmp_path / "escape.csv").exists()
+
+
+def test_same_named_archives_do_not_merge(tmp_path):
+    first = _zip_of(tmp_path / "first.zip", {"x.csv": "a,b\n1,2\n"})
+    second = _zip_of(tmp_path / "second.zip", {"y.csv": "a,b\n3,4\n"})
+    outer = _zip_of(tmp_path / "o.zip", {"one/a.zip": first, "two/a.zip": second})
+    r = resolve([str(outer)], tmp_path / "run" / "source")
+    assert sorted(p.name for p in r.tables) == ["x.csv", "y.csv"]

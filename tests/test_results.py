@@ -129,3 +129,13 @@ def test_html_links_to_the_traces(clf_csv, tmp_path):
     data = results.collect(task.run_dir)
     assert "traces_url" not in data["tracker"]
     assert "Traces</a>" not in html_report.render(data)
+
+
+def test_collect_mlflow_configures_the_environment_before_importing_mlflow(monkeypatch):
+    import orbit.tracking
+
+    called = []
+    monkeypatch.setattr(orbit.tracking, "configure_mlflow_env", lambda: called.append(True))
+    with pytest.raises(ValueError, match="not an MLflow run id"):
+        results.collect_mlflow("bad id")
+    assert called  # set up before anything else happens, so MLflow's import banner stays quiet

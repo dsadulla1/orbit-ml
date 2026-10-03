@@ -402,3 +402,23 @@ def test_system_metrics_sampling_interval_default(monkeypatch):
     monkeypatch.setenv("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL", "2")
     MLflowTracker()
     assert os.environ["MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL"] == "2"
+
+
+def test_experiments_command_orders_by_the_latest_run(mlflow_uri):
+    import mlflow
+    from typer.testing import CliRunner
+
+    from orbit.cli import app
+
+    client = mlflow.MlflowClient()
+    old, new = client.create_experiment("older-problem"), client.create_experiment("newer-problem")
+    day = 86_400_000
+    for exp, start in ((old, 1_700_000_000_000), (new, 1_700_000_000_000 + 5 * day)):
+        run = client.create_run(exp, start_time=start)
+        client.set_terminated(run.info.run_id, end_time=start + 1000)
+    # a later run in the older experiment: it is now the most recently used one
+    late = client.create_run(old, start_time=1_700_000_000_000 + 9 * day)
+    client.set_terminated(late.info.run_id, end_time=1_700_000_000_000 + 9 * day + 1000)
+    result = CliRunner().invoke(app, ["experiments"])
+    assert result.exit_code == 0 and "last run" in result.output
+    assert result.output.index("older-problem") < result.output.index("newer-problem")

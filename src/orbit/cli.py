@@ -52,14 +52,14 @@ def explore(
     """
     import tempfile
 
-    from .planner import PlanError, describe_table, format_note, load_for_profile, match_table
+    from .planner import PlanError, describe_table, format_notes, load_for_profile, match_table
     from .sources import SourceError, resolve
 
     with tempfile.TemporaryDirectory(prefix="orbit-explore-") as tmp:
         try:
             found = resolve(data, Path(tmp) / "source")
             loaded = {p: load_for_profile(p) for p in found.tables}
-            notes = found.notes + [n for n in map(format_note, found.tables) if n]
+            notes = found.notes + format_notes(found.tables)
         except (SourceError, ValueError, OSError) as e:
             console.print(f"[red]Could not read the data:[/] {escape(str(e))}")
             raise typer.Exit(1)
@@ -447,25 +447,25 @@ def experiments():
         client = mlflow.MlflowClient()
         rows = []
         for exp in client.search_experiments():
-            runs, token = 0, None
+            runs, latest, token = 0, 0, None
             while True:
                 page = client.search_runs([exp.experiment_id], max_results=1000, page_token=token)
                 runs += sum("mlflow.parentRunId" not in r.data.tags for r in page)
+                latest = max([latest, *(r.info.end_time or r.info.start_time or 0 for r in page)])
                 token = page.token
                 if not token:
                     break
             if exp.name == "Default" and not runs:
                 continue
-            rows.append((exp, runs))
+            rows.append((exp, runs, latest or exp.last_update_time or 0))
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Could not reach MLflow:[/] {escape(str(e)[:300])}")
         raise typer.Exit(1)
     table = Table(title="MLflow experiments")
-    for col in ("name", "id", "runs", "last updated"):
+    for col in ("name", "id", "runs", "last run"):
         table.add_column(col, overflow="fold")
-    for exp, runs in sorted(rows, key=lambda r: r[0].last_update_time or 0, reverse=True):
-        updated = (datetime.datetime.fromtimestamp(exp.last_update_time / 1000).strftime("%Y-%m-%d %H:%M")
-                   if exp.last_update_time else "")
+    for exp, runs, latest in sorted(rows, key=lambda r: r[2], reverse=True):
+        updated = datetime.datetime.fromtimestamp(latest / 1000).strftime("%Y-%m-%d %H:%M") if latest else ""
         table.add_row(escape(exp.name), exp.experiment_id, str(runs), updated)
     console.print(table)
 

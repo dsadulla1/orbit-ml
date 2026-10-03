@@ -112,6 +112,9 @@ def collect(run_dir: Path) -> dict:
 
 def collect_mlflow(run_id: str, client=None) -> dict:
     """The same experiment-level results, read from an MLflow server by parent run id."""
+    from .tracking import configure_mlflow_env
+
+    configure_mlflow_env()  # before the import: MLflow prints a banner on import otherwise
     import mlflow
 
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id or ""):

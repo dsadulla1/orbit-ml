@@ -9,6 +9,8 @@ from html import escape
 from jinja2 import Environment
 from markupsafe import Markup
 
+from .report import no_spread_caveat, split_rows
+
 W, ROW, PAD_L, PAD_R, PAD_T, PAD_B = 720, 28, 56, 90, 14, 34
 
 
@@ -131,6 +133,7 @@ h1{font-size:1.6rem;line-height:1.25;margin:0 0 4px}h2{font-size:1.1rem;margin:3
 .tile,.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .tile .k{color:var(--ink2);font-size:.85rem}.tile .v{font-size:1.7rem;font-weight:600;line-height:1.2}
 .tile .d{color:var(--muted);font-size:.8rem}
+.warn{border-left:4px solid var(--bad)}
 .card p{margin:.4em 0}.card ol{margin:.3em 0 .3em 1.2em;padding:0}
 .chart{width:100%;height:auto;display:block}
 .chart .grid{stroke:var(--line);stroke-width:1}.chart .base{stroke:var(--muted);stroke-width:1;stroke-dasharray:0}
@@ -161,6 +164,14 @@ TEMPLATE = """<!doctype html>
 <div class="tiles">
 {% for t in tiles %}<div class="tile"><div class="k">{{ t.k }}</div><div class="v">{{ t.v }}</div><div class="d">{{ t.d }}</div></div>
 {% endfor %}</div>
+
+{% if splits %}<h2>Splits</h2>
+<div class="card scroll"><table>
+<tr><th>split</th><th>rows</th><th>target</th></tr>
+{% for r in splits %}<tr><td>{{ r[0] }}</td><td class="n">{{ "{:,}".format(r[1]) }}</td><td>{{ r[2] }}</td></tr>
+{% endfor %}</table>
+{% if shift_warning %}<p class="warn" style="padding-left:12px"><strong>Warning:</strong> {{ shift_warning }}</p>{% endif %}
+{% if spread_note %}<p class="meta">{{ spread_note }}</p>{% endif %}</div>{% endif %}
 
 {% if narrative %}<h2>Summary</h2><div class="card">{{ narrative }}<p class="meta">{{ check }}</p></div>{% endif %}
 
@@ -205,7 +216,10 @@ def render(data: dict) -> str:
     tiles = [
         {"k": f"Best validation {task['metric']}", "v": _fmt(best.get("val_score")),
          "d": f"± {_fmt(sd)} across folds" if sd is not None else task["validation"]},
-        {"k": "Held-out test score", "v": _fmt(best.get("test_score")), "d": "scored once, for the winner"},
+        {"k": "Held-out test score", "v": _fmt(best.get("test_score")),
+         "d": (f"baseline {_fmt(s['test_baseline'])}, gain {_fmt(s['test_gain'])}"
+               if s.get("test_baseline") is not None and s.get("test_gain") is not None
+               else "scored once, for the winner")},
         {"k": "Baseline (ignores features)", "v": _fmt(task["baseline"]),
          "d": f"gain {_fmt(best.get('gain_over_baseline'))}" if best else ""},
         {"k": "Experiments", "v": f"{s['experiments_run'] - s['experiments_failed']} ok",
@@ -218,7 +232,15 @@ def render(data: dict) -> str:
     rows.sort(key=lambda r: (r["val_score"] is None,
                              -(r["val_score"] or 0) if task["greater_is_better"] else (r["val_score"] or 0)))
     tracker = data.get("tracker") or {}
+    shift = s.get("distribution_shift") or {}
+    shift_warning = (f"the splits have different target distributions ({shift['detail']}), so scores "
+                     "and baselines differ between validation and test; compare gains over each "
+                     "baseline, not raw scores.") if shift.get("flag") else ""
+    if not shift_warning and shift.get("folds_differ"):
+        shift_warning = f"{shift['detail']}, so the spread across folds partly reflects that."
     return _env.from_string(TEMPLATE).render(
+        splits=split_rows(s), shift_warning=shift_warning,
+        spread_note=no_spread_caveat(s) + "." if s.get("splits") and not s.get("has_spread", True) else "",
         css=Markup(CSS), title=title, subtitle=subtitle, meta=meta, tiles=tiles,
         narrative=narrative_html(data["narrative"]) if data["narrative"] else "", check=data["narrative_check"],
         chart=score_chart(exps, task["baseline"], best_id, task["greater_is_better"], task["metric"]),

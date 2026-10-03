@@ -99,6 +99,7 @@ def collect(run_dir: Path) -> dict:
                     "id_column": spec.id_column, "notes": spec.notes},
         "task": {"kind": task.kind, "metric": task.metric_name,
                  "greater_is_better": task.metric.greater_is_better, "baseline": task.baseline,
+                 "test_baseline": task.test_baseline,
                  "folds": task.n_folds, "validation": f["validation"], "classes": task.classes},
         "summary": f, "narrative": narrative, "narrative_check": check,
         "experiments": experiments,

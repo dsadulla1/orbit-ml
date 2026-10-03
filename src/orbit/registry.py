@@ -9,6 +9,7 @@ sandbox by `export_best` and is only loaded where the model is served.
 Nothing in this module raises for MLflow problems: they come back in `RegistryResult.message`.
 """
 import contextlib
+import hashlib
 import json
 import logging
 import warnings
@@ -18,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from .metrics import METRICS
+from .pickle_scan import CUSTOM_FILE
 from .task import HELPER_FILE, META_FILE
 
 log = logging.getLogger("orbit")
@@ -95,6 +97,15 @@ def _scores(run_dir: Path, node_id) -> dict:
             "test_score": node.get("test_score")}
 
 
+def _custom_module(run_dir: Path) -> Path | None:
+    path = Path(run_dir) / "export" / CUSTOM_FILE
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _custom_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _tags(run_dir: Path, export, run_id: str) -> dict[str, str]:
     from .task import Task
     from .tracking import data_fingerprint
@@ -111,10 +122,12 @@ def _tags(run_dir: Path, export, run_id: str) -> dict[str, str]:
         tags["orbit.data_fingerprint"] = data_fingerprint(Task.load(run_dir))
     except Exception as e:  # noqa: BLE001
         log.warning("registry: no data fingerprint: %s", e)
+    if _custom_module(run_dir):
+        tags["orbit.custom_code"] = "true"
     return {k: str(v)[:5000] for k, v in tags.items()}
 
 
-def _description(data: dict, tags: dict) -> str:
+def _description(data: dict, tags: dict, custom: Path | None = None) -> str:
     task, prob = data["task"], data["problem"]
     score = tags.get("orbit.val_score")
     std = f" ± {float(tags['orbit.val_std']):.4f}" if "orbit.val_std" in tags else ""
@@ -131,6 +144,11 @@ def _description(data: dict, tags: dict) -> str:
              "score of the refit itself. It takes raw feature rows and returns the probability of "
              "the positive class (probability metrics) or the prediction. Loading it needs the "
              "pinned libraries: " + ", ".join(PINNED) + "."]
+    if custom:
+        lines += ["", f"This model includes custom code from the experiment: `{CUSTOM_FILE}` "
+                  f"(sha256 {_custom_sha256(custom)}). It is shipped with the model, was checked "
+                  "statically and is imported when the model is loaded; read it in the model's "
+                  "`code/` folder before loading the model anywhere you trust."]
     return "\n".join(lines)
 
 
@@ -148,15 +166,15 @@ def _signature(sample: pd.DataFrame, preds: pd.Series):
                           outputs=outputs)
 
 
-def _log_model(mlflow, export, input_dir: Path, name: str, run_id: str):
-
+def _log_model(mlflow, export, input_dir: Path, name: str, run_id: str, custom: Path | None = None):
     sample = pd.read_csv(export.sample_input)
     preds = pd.read_csv(export.sample_predictions)["prediction"]
     with mlflow.start_run(run_id=run_id):
         return mlflow.pyfunc.log_model(
             name="model", python_model=str(Path(__file__).with_name("orbit_model.py")),
             artifacts={"model": str(export.model_path), "meta": str(input_dir / META_FILE)},
-            code_paths=[str(input_dir / HELPER_FILE)], pip_requirements=pip_requirements(),
+            code_paths=[str(input_dir / HELPER_FILE), *([str(custom)] if custom else [])],
+            pip_requirements=pip_requirements(),
             signature=_signature(sample, preds), input_example=sample.head(5),
             registered_model_name=name)
 
@@ -202,7 +220,7 @@ def register_model(run_dir: Path, export, model_name: str | None = None, promote
         mlflow.set_tracking_uri(uri)  # the registry follows it
         try:
             with _quiet():
-                logged = _log_model(mlflow, export, input_dir, name, run_id)
+                logged = _log_model(mlflow, export, input_dir, name, run_id, _custom_module(run_dir))
         finally:
             mlflow.set_tracking_uri(previous)
         version = int(logged.registered_model_version)
@@ -210,7 +228,8 @@ def register_model(run_dir: Path, export, model_name: str | None = None, promote
         for key, value in tags.items():
             client.set_model_version_tag(name, str(version), key, value)
         client.update_model_version(name, str(version),
-                                    _description(_scores(run_dir, export.node_id)["data"], tags))
+                                    _description(_scores(run_dir, export.node_id)["data"], tags,
+                                                 _custom_module(run_dir)))
         result.promoted, why = decide_alias(client, name, tags, promote, force_champion)
         if result.promoted:
             client.set_registered_model_alias(name, CHAMPION, str(version))

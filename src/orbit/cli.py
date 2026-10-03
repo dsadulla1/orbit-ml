@@ -233,9 +233,35 @@ def _model_line(model: dict) -> str:
     return f"export failed: {model.get('error') or 'unknown error'}"
 
 
+def _print_export_failure(run_dir: Path, res) -> None:
+    """The failed-export block: what went wrong in plain words, where to look, how to retry."""
+    from .export import example_hint, explain_failure
+
+    why = res.explanation or explain_failure(res.error or "")
+    export_dir = Path(run_dir) / "export"
+    n = max(res.attempts, 1)
+    console.print(f"[yellow]Export failed after {res.attempts} attempt{'s' * (res.attempts != 1)}:[/] "
+                  f"{escape(why)}")
+    if res.attempts:
+        console.print(f"  Details: {escape(str(export_dir / 'export.json'))}; scripts, replies and "
+                      f"stderr of each attempt are in {escape(str(export_dir / f'attempt_{n}'))} "
+                      "(and attempt_1, ...)")
+    else:
+        console.print(f"  Details: {escape(str(export_dir / 'export.json'))}")
+    hint = example_hint(res.error or "")
+    if hint:
+        console.print(f"  To retry with guidance: orbit export {escape(str(run_dir))} "
+                      f'--hint "{escape(hint)}"')
+    else:
+        console.print("  A retry cannot help until the run has a working experiment.")
+    if res.notes:
+        for note in res.notes:
+            console.print(f"  [dim]{escape(note)}[/]")
+
+
 def _export_model(task: Task, journal: Journal, llm, sandbox, exec_timeout: int, cpus: float,
                   register: bool = True, model_name: str | None = None, force_champion: bool = False,
-                  attempts: int | None = None) -> bool:
+                  attempts: int | None = None, hint: str | None = None) -> bool:
     """Export the best experiment as one verified model and register it in MLflow. Problems are
     printed as warnings and never raise; returns whether the export worked."""
     from .export import export_best
@@ -243,12 +269,10 @@ def _export_model(task: Task, journal: Journal, llm, sandbox, exec_timeout: int,
 
     console.print("\n[dim]Exporting the best model (refit on all labeled rows) ...[/]")
     try:
-        res = export_best(task, journal, llm, sandbox, exec_timeout, cpus,
+        res = export_best(task, journal, llm, sandbox, exec_timeout, cpus, hint=hint,
                           **({"max_attempts": attempts} if attempts else {}))
         if not res.ok:
-            console.print(f"[yellow]Model export failed:[/] {escape(res.error or 'unknown error')}")
-            for note in res.notes:
-                console.print(f"  [dim]{escape(note)}[/]")
+            _print_export_failure(task.run_dir, res)
             return False
         size = res.model_path.stat().st_size / 1e6
         console.print(f"Model: exported (experiment #{res.node_id}, {res.attempts} attempt"
@@ -445,6 +469,8 @@ def export(
     force_champion: bool = typer.Option(False, "--force-champion",
                                         help="Move the champion alias to the new version regardless of score"),
     attempts: int = typer.Option(3, min=1, help="Attempts at a verified export"),
+    hint: str = typer.Option(None, "--hint", help="Extra guidance for the LLM, at most 1000 characters "
+                             "(for example after a failed export)"),
 ):
     """Refit a run's best experiment on all labeled rows, verify it and register it in MLflow.
 
@@ -455,8 +481,13 @@ def export(
     Examples:
       orbit export runs/20261001-120000-wine
       orbit export runs/20261001-120000-wine --model-name wine-quality --force-champion
+      orbit export runs/20261001-120000-wine --hint "Put the feature code in orbit_custom.py"
     """
+    from .prompts import MAX_HINT_CHARS
     from .sandbox import DockerSandbox, check_docker
+
+    if hint is not None and len(hint) > MAX_HINT_CHARS:
+        raise typer.BadParameter(f"{len(hint)} characters; the limit is {MAX_HINT_CHARS}", param_hint="--hint")
 
     sb_settings = SandboxSettings()
     ok, msg = check_docker(sb_settings)
@@ -467,7 +498,7 @@ def export(
     task, journal = Task.load(run_dir), Journal.load(run_dir / "journal.json")
     if not _export_model(task, journal, llm, DockerSandbox(sb_settings), sb_settings.timeout,
                          sb_settings.cpus, register=not no_register, model_name=model_name,
-                         force_champion=force_champion, attempts=attempts):
+                         force_champion=force_champion, attempts=attempts, hint=hint):
         raise typer.Exit(1)
 
 

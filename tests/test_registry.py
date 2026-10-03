@@ -20,6 +20,7 @@ from orbit.tracking import MLflowTracker
 
 from conftest import LocalSandbox, ScriptedLLM, clf_reply
 from test_export import CLF, REG
+from test_export_custom import MAIN_CLASS
 from test_tracking import mlflow_uri  # noqa: F401 - fixture
 
 REG_SEARCH = """PLAN: Ridge regression.
@@ -438,8 +439,8 @@ def test_export_command_failure_exits_1(clf_run, cli, mlflow_uri):
     task, _, _ = clf_run
     runner, app, _ = cli([BROKEN] * 2)
     r = runner.invoke(app, ["export", str(task.run_dir), "--attempts", "2"])
-    assert r.exit_code == 1 and "Model export failed" in r.output
-    assert "noattemptproducedaverifiedmodel" in _flat(r.output)
+    assert r.exit_code == 1 and "Exportfailedafter2attempts:" in _flat(r.output)
+    assert "exportscriptcrashed" in _flat(r.output) and "orbitexport" in _flat(r.output)
     assert not (task.run_dir / "export" / "registry.json").exists()
     from orbit import html_report, results
     data = results.collect(task.run_dir)
@@ -531,3 +532,121 @@ def test_model_line_in_results_and_html_with_link_and_escaping(clf_csv, tmp_path
     (task.run_dir / "tracking.json").write_text(json.dumps({"uri": "sqlite:///x.db", "experiment_id": "1",
                                                             "run_id": "abc"}))
     assert results.collect(task.run_dir)["model"]["url"] is None
+
+
+# ---- custom model code ----
+
+@pytest.fixture
+def custom_run(clf_csv, tmp_path, mlflow_uri):
+    from test_export_custom import custom
+
+    return _search_and_export(tmp_path, clf_csv, "label", clf_reply(), custom())
+
+
+def test_custom_module_is_registered_described_and_served_without_orbit(custom_run, tmp_path, mlflow_uri):
+    import hashlib
+
+    import mlflow
+
+    task, _, export = custom_run
+    assert export.custom_module is not None
+    res = register_model(task.run_dir, export)
+    assert res.version == 1, res.message
+    version = mlflow.MlflowClient().get_model_version("orbit-test", "1")
+    sha = hashlib.sha256(export.custom_module.read_bytes()).hexdigest()
+    assert version.tags["orbit.custom_code"] == "true"
+    assert "includes custom code from the experiment" in version.description and sha in version.description
+    local = Path(mlflow.artifacts.download_artifacts(res.uri))
+    files = {p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()}
+    assert {"code/orbit_custom.py", "code/orbit_helpers.py"} <= files
+
+    got = _subprocess(tmp_path, mlflow_uri, PREDICT_SAMPLE.format(
+        name="orbit-test", sample=str(export.sample_input)))   # no orbit on sys.path in there
+    expected = pd.read_csv(export.sample_predictions)["prediction"].tolist()
+    assert np.allclose(got, expected, atol=1e-9)
+
+
+def test_models_without_custom_code_have_no_tag_or_description_line(clf_run, mlflow_uri):
+    import mlflow
+
+    task, _, export = clf_run
+    register_model(task.run_dir, export)
+    version = mlflow.MlflowClient().get_model_version("orbit-test", "1")
+    assert "orbit.custom_code" not in version.tags and "custom code" not in version.description
+    local = Path(mlflow.artifacts.download_artifacts("models:/orbit-test/1"))
+    assert not list(local.rglob("orbit_custom.py"))
+
+
+# ---- failure block and --hint ----
+
+def test_export_command_failure_block_explains_and_offers_a_retry(clf_run, cli, mlflow_uri):
+    task, _, _ = clf_run
+    runner, app, _ = cli([MAIN_CLASS] * 2)
+    r = runner.invoke(app, ["export", str(task.run_dir), "--attempts", "2"])
+    out = _flat(r.output)
+    assert r.exit_code == 1
+    assert "Exportfailedafter2attempts:" in out and "FeatureEngineer" in out
+    assert "orbit_custom.py" in out
+    assert _flat(str(task.run_dir / "export" / "export.json")) in out
+    assert _flat(str(task.run_dir / "export" / "attempt_2")) in out
+    assert "orbitexport" in out and _flat(f'--hint "Move FeatureEngineer into orbit_custom.py') in out
+    first, second = r.output.index("Export failed after"), r.output.index("Details:")
+    assert first < second < r.output.index("To retry with guidance")
+
+
+def test_failure_block_escapes_model_text(clf_run, cli, mlflow_uri):
+    task, _, _ = clf_run
+    script = (
+        "PLAN: x\n```python\nclass Fe[/red][bold]:\n    pass\n```")
+    runner, app, _ = cli([script] * 2)
+    r = runner.invoke(app, ["export", str(task.run_dir), "--attempts", "1"])
+    assert r.exit_code == 1 and "Exportfailedafter1attempt" in _flat(r.output)
+    assert "MarkupError" not in r.output and "Traceback" not in r.output.split("Export failed")[0]
+
+
+def test_hint_option_reaches_the_prompt_and_is_capped(clf_run, cli, mlflow_uri):
+    task, _, _ = clf_run
+    runner, app, llm = cli([CLF, CLF])
+    r = runner.invoke(app, ["export", str(task.run_dir), "--no-register", "--hint", "Prefer a plain linear model"])
+    assert r.exit_code == 0, r.output
+    assert "Hint from the user: Prefer a plain linear model" in llm.prompts[0]
+    r = runner.invoke(app, ["export", str(task.run_dir), "--hint", "x" * 1001])
+    assert r.exit_code != 0 and "1000" in _flat(r.output) and len(llm.prompts) == 1
+    r = runner.invoke(app, ["export", str(task.run_dir), "--no-register", "--hint", "x" * 1000])
+    assert r.exit_code == 0 and "x" * 1000 in llm.prompts[1]
+    assert "--hint" in runner.invoke(app, ["export", "--help"]).output
+
+
+def test_reexport_prompt_mentions_the_earlier_failure(clf_run, cli, mlflow_uri):
+    task, _, _ = clf_run
+    runner, app, llm = cli([MAIN_CLASS, CLF])
+    assert runner.invoke(app, ["export", str(task.run_dir), "--attempts", "1"]).exit_code == 1
+    r = runner.invoke(app, ["export", str(task.run_dir), "--no-register"])
+    assert r.exit_code == 0
+    assert "An earlier export of this run failed with:" in llm.prompts[1]
+    assert "FeatureEngineer" in llm.prompts[1]
+
+
+def test_run_prints_the_failure_block_and_still_exits_zero(clf_csv, tmp_path, monkeypatch, mlflow_uri):
+    from typer.testing import CliRunner
+
+    from conftest import BROKEN
+    from orbit.cli import app
+
+    class ByPrompt(ScriptedLLM):
+        def complete(self, system, user):
+            self.replies = [BROKEN if "## Export task" in user else clf_reply()]
+            return super().complete(system, user)
+
+    llm = ByPrompt([])
+    monkeypatch.setattr("orbit.sandbox.check_docker", lambda s=None: (True, "ok"))
+    monkeypatch.setattr("orbit.sandbox.DockerSandbox", lambda settings=None: LocalSandbox())
+    monkeypatch.setattr("orbit.cli._llm", lambda: llm)
+    monkeypatch.chdir(tmp_path)
+    r = CliRunner().invoke(app, ["run", str(clf_csv), "-t", "label", "--steps", "1", "--drafts", "1",
+                                 "--tracker", "mlflow", "--folds", "1", "--out", str(tmp_path / "runs")])
+    out = _flat(r.output)
+    assert r.exit_code == 0, r.output
+    assert "Exportfailedafter3attempts:" in out and "orbitexport" in out and "--hint" in out
+    run_dir = next((tmp_path / "runs").iterdir())
+    assert (run_dir / "export" / "export.json").exists() and (run_dir / "journal.json").exists()

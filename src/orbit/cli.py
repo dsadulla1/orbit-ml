@@ -126,6 +126,9 @@ def run(
     time_col: str = typer.Option(None, "--time-col",
                                  help="Order rows by this column and validate on later rows than "
                                       "the ones used for training"),
+    time_order: bool = typer.Option(False, "--time-order",
+                                    help="The rows are already in time order: validate on later rows than "
+                                         "the ones used for training, without needing a date column"),
     patience: int = typer.Option(None, min=1,
                                  help="Stop after this many working experiments in a row that do "
                                       "not beat the best by more than its spread across folds"),
@@ -156,6 +159,9 @@ def run(
 
     if tracker not in TRACKERS:
         raise typer.BadParameter(f"choose one of {', '.join(TRACKERS)}", param_hint="--tracker")
+    if time_col and time_order:
+        raise typer.BadParameter("use either --time-col (a column gives the order) or --time-order "
+                                 "(the file order is the time order), not both", param_hint="--time-order")
     try:
         experiment_name = resolve_experiment(experiment, data, name)
     except ValueError as e:
@@ -171,7 +177,8 @@ def run(
     run_dir = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
     try:
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
-                          seed=seed, llm=llm, within=out, time_col=time_col, table=table)
+                          seed=seed, llm=llm, within=out, time_col=time_col, table=table,
+                          time_order=time_order)
     except (SourceError, PlanError, ValueError) as e:
         console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)
@@ -182,9 +189,9 @@ def run(
     trk.start(task, cfg, llm.model)
 
     scheme = f"{task.n_folds}-fold CV" if task.n_folds > 1 else "single split"
-    if task.spec.time_col:
+    if task.spec.time_col or task.spec.time_order:
         scheme = (f"{task.n_folds} forward-chaining folds" if task.n_folds > 1 else "single split") \
-                 + f" ordered by {escape(task.spec.time_col)}"
+                 + f" ordered by {escape(task.spec.time_col or 'file order')}"
     console.print(f"[bold]orbit[/] {escape(str(run_dir))}  model={escape(llm.model)}  tracker={trk.name}"
                   + (f"  experiment={escape(experiment_name)}" if trk.name != "none" else ""))
     console.print(f"  data: {escape(Path(task.spec.data_path).name)}, target={escape(task.spec.target)}, "
@@ -193,6 +200,11 @@ def run(
         console.print(f"  extra tables: {escape(', '.join(Path(p).name for p in task.spec.extras))}")
     for note in task.spec.notes:
         console.print(f"  [dim]{escape(note)}[/]")
+    info, warning = report_mod.setup_lines(task)
+    for line in info:
+        console.print(f"  [dim]{escape(line)}[/]")
+    if warning:
+        console.print(f"  [yellow]{escape(warning)}[/]")
 
     def on_node(node, agent):
         best = agent.best()
@@ -357,6 +369,17 @@ def results(
         std = f" ± {best['val_std_across_folds']}" if best.get("val_std_across_folds") else ""
         console.print(f"Best: experiment #{best['experiment']}  validation {best['val_score']}{std}  "
                       f"test {best['test_score']}  (gain over baseline {best['gain_over_baseline']})")
+        if s.get("test_baseline") is not None:
+            console.print(f"[dim]Baseline: validation {s['val_baseline']}, test {s['test_baseline']}; "
+                          f"gain: validation {s['val_gain']}, test {s['test_gain']}[/]")
+    for name, n, target in report_mod.split_rows(s):
+        console.print(f"[dim]Split {escape(name)}: {n:,} rows, {escape(target)}[/]")
+    if s["distribution_shift"]["flag"]:
+        console.print(f"[yellow]The splits have different target distributions "
+                      f"({escape(s['distribution_shift']['detail'])}): compare gains over baseline, "
+                      "not raw scores.[/]")
+    if not s["has_spread"]:
+        console.print(f"[dim]{escape(report_mod.no_spread_caveat(s))}[/]")
     table = Table()
     for col in ("#", "stage", "validation", "test", "approach / error"):
         table.add_column(col, overflow="fold")

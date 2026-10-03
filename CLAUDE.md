@@ -25,6 +25,12 @@ docker compose --env-file .env -f docker/compose.yaml build sandbox
 - The LLM protocol is plain text (`PLAN:` plus one fenced Python block). Don't require native
   tool calling.
 - `docker/sandbox-requirements.txt` and `prompts.LIBRARIES` must list the same libraries.
+- Anything copied into a sandbox input directory (extra tables, helper files, export inputs) must
+  not contain labels of rows that are being validated or tested. The export input is built from
+  the user's source file after final scoring, never from `hidden/`.
+- Exported models are pickles written by generated code: they are scanned and verified in the
+  sandbox, and only ever loaded in the `orbit-serve` container, never on the host. The pins in
+  `registry.py` must match `docker/sandbox-requirements.txt`.
 
 ## Workflow
 

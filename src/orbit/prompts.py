@@ -133,9 +133,15 @@ feature columns of data/test.csv without {id_col!r} (raw text columns and NaN al
 preprocessing and feature engineering itself. Use only classes importable from scikit-learn, \
 lightgbm, xgboost, numpy, pandas or orbit_helpers. `orbit_helpers.Preprocessor(fill=True, \
 drop=[...])` does the text encoding and imputation inside a Pipeline (fill=False keeps NaN for \
-LightGBM / XGBoost). Identifier column(s) to drop inside the pipeline: {id_columns}. NO lambdas, no \
-classes or functions defined in the script, and no helper function defined in the script that the \
-pipeline calls: anything defined in __main__ cannot be loaded by another program. Pickle with \
+LightGBM / XGBoost). Identifier column(s) to drop inside the pipeline: {id_columns}. NO lambdas, and \
+NEVER define a class or function in the script itself: anything defined in __main__ cannot be \
+loaded by another program. If you need your own transformer or feature function, put it in a module \
+file written next to model.pkl (`open('orbit_custom.py', 'w').write(SRC)`, then `import orbit_custom`) \
+and use `orbit_custom.Name` in the pipeline. Only numpy, pandas, scipy, scikit-learn, lightgbm, \
+xgboost and the standard maths/text modules may be imported inside it; no file, network, os or eval \
+access. For a probability metric fit the classifier on `d.y_train_binary` (1 = positive label) or on \
+the original labels `d.y_train`: the saved object's `classes_` must be [0, 1] or contain the original \
+labels. Pickle with \
 plain `pickle`, not joblib. If the script transforms the target (log1p, scaling), the transform \
 belongs INSIDE the object so `predict` returns values on the original scale: wrap the regressor as \
 `TransformedTargetRegressor(regressor=<pipeline>, func=numpy.log1p, \
@@ -158,6 +164,19 @@ model = Pipeline([("prep", Preprocessor(fill=True, drop=[...])), ("model", ...)]
 pickle.dump(model, open("model.pkl", "wb"), protocol=4)
 d.save(model.predict_proba(d.test_df.drop(columns=["orbit_id"])))  # or .predict(...), see the rule
 ```
+A custom transformer, written as a module first:
+```python
+SRC = '''
+import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
+class Ratio(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None): return self
+    def transform(self, X): return X.assign(ratio=X["a"] / (X["b"] + 1))
+'''
+open("orbit_custom.py", "w").write(SRC)
+import importlib; importlib.invalidate_caches()
+import orbit_custom   # then Pipeline([("ratio", orbit_custom.Ratio()), ("prep", ...), ...])
+```
 The saved model is reloaded in a fresh process and must reproduce predictions.csv from the raw \
 rows. Return the full script."""
 
@@ -173,6 +192,17 @@ EXPORT_RETRY = """
 {error}
 ```
 Fix the root cause. Do not repeat a fix that has already failed."""
+
+EXPORT_HINT = """
+
+Hint from the user: {hint}"""
+
+EXPORT_EARLIER = """
+
+An earlier export of this run failed with: {earlier}
+Do not repeat the approach that failed."""
+
+MAX_HINT_CHARS = 1000
 
 
 def missing_code_message(reply_text: str) -> str:
@@ -232,13 +262,19 @@ def data_section(task, export: bool = False) -> str:
                                extras=extras)
 
 
-def export_prompt(task, node, previous_code: str | None = None, error: str | None = None) -> str:
+def export_prompt(task, node, previous_code: str | None = None, error: str | None = None,
+                  hint: str | None = None, earlier: str | None = None) -> str:
     """The user prompt for rewriting `node`'s script as an exported model; with `previous_code` and
-    `error` it also shows the last failed export attempt."""
+    `error` it also shows the last failed export attempt. `hint` is guidance from the user (at most
+    `MAX_HINT_CHARS` characters) and `earlier` how a previous export of the run failed."""
     ids = [task.spec.id_column] if task.spec.id_column else []
     text = EXPORT.format(data=data_section(task, export=True), node_id=node.id, score=node.metric,
                          plan=node.plan, code=node.code, id_col=ID_COL,
                          id_columns=", ".join(map(repr, ids)) or "none declared")
+    if earlier:
+        text += EXPORT_EARLIER.format(earlier=earlier)
+    if hint and hint.strip():
+        text += EXPORT_HINT.format(hint=hint.strip()[:MAX_HINT_CHARS])
     if previous_code is not None:
         text += EXPORT_RETRY.format(code=previous_code, error=error)
     return text

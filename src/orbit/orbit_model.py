@@ -14,9 +14,25 @@ from mlflow.models import set_model
 
 def _label(value) -> str:
     """A class label as text, with whole floats written as integers (1.0 -> "1")."""
-    if isinstance(value, float) and value == int(value):
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
         return str(int(value))
     return str(value)
+
+
+def _positive_column(classes, positive) -> int:
+    """The predict_proba column of the positive label: the column whose class equals it (as text),
+    else the column of 1 when the classes are exactly 0 and 1 (ints, floats or bools: the
+    classifier was fitted on the 0/1 target), else an error."""
+    labels = [_label(c) for c in classes]
+    if _label(positive) in labels:
+        return labels.index(_label(positive))
+    numbers = [float(c) for c in classes
+               if isinstance(c, (bool, int, float, np.bool_, np.integer, np.floating))]
+    if len(classes) == 2 and sorted(numbers) == [0.0, 1.0]:
+        return numbers.index(1.0)
+    raise ValueError(f"the model's classes_ are {list(classes)} but the positive label is "
+                     f"{positive!r}: classes_ must be [0, 1] (1 = positive label) or contain the "
+                     "original labels")
 
 
 class OrbitModel(mlflow.pyfunc.PythonModel):
@@ -38,8 +54,7 @@ class OrbitModel(mlflow.pyfunc.PythonModel):
         ignore = {self.meta.get("target"), self.meta.get("id_column"), "orbit_id"} - {None}
         rows = rows.drop(columns=[c for c in rows.columns if c in ignore])
         if self.meta.get("needs_proba"):
-            labels = [_label(c) for c in self.model.classes_]
-            column = labels.index(_label(self.meta["positive_label"]))
+            column = _positive_column(list(self.model.classes_), self.meta["positive_label"])
             pred = self.model.predict_proba(rows)[:, column]
         else:
             pred = self.model.predict(rows)

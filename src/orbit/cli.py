@@ -8,10 +8,11 @@ from rich.markdown import Markdown
 from rich.markup import escape
 from rich.table import Table
 
+from . import prompts
 from . import report as report_mod
 from .agent import Agent, Journal, SearchConfig
 from .config import LLMSettings, SandboxSettings, load_dotenv, tracker_choice
-from .task import Task, TaskSpec, prepare, profile
+from .task import Task, TaskSpec, parse_drop, prepare, profile
 
 app = typer.Typer(help="Autonomous ML experiments: an LLM proposes, a sandbox runs, orbit scores.",
                   no_args_is_help=True, add_completion=False)
@@ -42,6 +43,9 @@ def explore(
     goal: str = typer.Option(None, help="Accepted for symmetry with `run`; explore makes no LLM call"),
     table: str = typer.Option(None, "--table", help="Profile this table (file name or part of it) when "
                                                     "several tables hold the target"),
+    drop: list[str] = typer.Option(None, "--drop", metavar="COL",
+                                   help="Column to leave out of the profile, as for `run` (repeatable, "
+                                        "or comma separated)"),
 ):
     """Show the tables and documents found in the sources and the data profile the agent sees.
 
@@ -55,6 +59,7 @@ def explore(
     from .planner import PlanError, describe_table, format_notes, load_for_profile, match_table
     from .sources import SourceError, resolve
 
+    dropped = parse_drop(drop)
     with tempfile.TemporaryDirectory(prefix="orbit-explore-") as tmp:
         try:
             found = resolve(data, Path(tmp) / "source")
@@ -97,9 +102,19 @@ def explore(
                 basis = (f"a random sample of {len(df):,} of {total:,} rows" if sampled
                          else f"all {total:,} rows")
                 console.print(escape(f"### {p.name} (profile of {basis})"))
-                console.print(escape(profile(df, target)))
+                gone = [c for c in dropped if c in df.columns and c != target]
+                for c in dropped:
+                    if c not in gone:
+                        why = "that is the target" if c == target else "no such column"
+                        console.print(f"[yellow]--drop {escape(repr(c))} ignored: {why}[/]")
+                if gone:
+                    console.print(escape(f"dropped columns: {', '.join(gone)} (as requested)"))
+                console.print(escape(profile(df.drop(columns=gone), target)))
             else:
-                console.print(escape(describe_table(p, df, total_rows=total, sampled=sampled)))
+                # With a target, --drop applies to the profiled table only; without one it marks columns.
+                marks = [] if target else [c for c in dropped if c in df.columns]
+                console.print(escape(describe_table(p, df, total_rows=total, sampled=sampled,
+                                                    dropped=marks)))
 
 
 @app.command()
@@ -132,7 +147,12 @@ def run(
     patience: int = typer.Option(None, min=1,
                                  help="Stop after this many working experiments in a row that do "
                                       "not beat the best by more than its spread across folds"),
-    timeout: int = typer.Option(None, help="Per-experiment time limit in seconds"),
+    drop: list[str] = typer.Option(None, "--drop", metavar="COL",
+                                   help="Column of the main table to leave out everywhere (repeatable, "
+                                        "or comma separated): use it for columns that leak the target "
+                                        "or are not known when predicting"),
+    timeout: int = typer.Option(None, help="Time limit for one experiment in seconds, shared by its "
+                                           "cross-validation folds"),
     tracker: str = typer.Option("auto", help="auto | mlflow | wandb | none"),
     out: Path = typer.Option(Path("runs"), help="Directory for run folders"),
     name: str = typer.Option(None, help="Name for the run folder: <timestamp>-<name> "
@@ -178,7 +198,7 @@ def run(
     try:
         task = setup_task(data, run_dir, goal=goal, eval_text=eval_text, target=target, folds=folds,
                           seed=seed, llm=llm, within=out, time_col=time_col, table=table,
-                          time_order=time_order)
+                          time_order=time_order, drop=parse_drop(drop))
     except (SourceError, PlanError, ValueError) as e:
         console.print(f"[red]Could not set up the task:[/] {escape(str(e))}")
         raise typer.Exit(1)
@@ -196,6 +216,9 @@ def run(
                   + (f"  experiment={escape(experiment_name)}" if trk.name != "none" else ""))
     console.print(f"  data: {escape(Path(task.spec.data_path).name)}, target={escape(task.spec.target)}, "
                   f"metric={task.metric_name}, baseline={task.baseline:.4f}, validation={scheme}")
+    limit = prompts.run_timeout(cfg.exec_timeout, task.n_folds)
+    console.print(f"  time limit: {cfg.exec_timeout}s per experiment"
+                  + (f", {limit}s per fold" if task.n_folds > 1 else ""))
     if task.spec.extras:
         console.print(f"  extra tables: {escape(', '.join(Path(p).name for p in task.spec.extras))}")
     for note in task.spec.notes:
@@ -300,6 +323,20 @@ def _register_exported(run_dir: Path, res, model_name: str | None, force_champio
                   + (f", alias {escape(', '.join(reg.aliases))}" if reg.aliases else ""))
     console.print(f"  [dim]{escape(reg.message)}[/]")
     return True
+
+
+def _print_table(table: Table, compact: list[tuple[str, str]]) -> None:
+    """Print `table`; when it is wider than the terminal print each row as a name line plus a
+    detail line instead, so a long name is never cut or wrapped into fragments."""
+    natural = console.measure(table, options=console.options.update(width=100_000)).maximum
+    if natural <= console.width:
+        console.print(table)
+        return
+    if table.title:
+        console.print(f"[bold]{escape(str(table.title))}[/]")
+    for name, detail in compact:
+        console.print(escape(name), soft_wrap=True)
+        console.print(f"  [dim]{escape(detail)}[/]", soft_wrap=True)
 
 
 def _short(text, limit=70):
@@ -463,11 +500,14 @@ def experiments():
         raise typer.Exit(1)
     table = Table(title="MLflow experiments")
     for col in ("name", "id", "runs", "last run"):
-        table.add_column(col, overflow="fold")
+        table.add_column(col, overflow="fold", no_wrap=col == "name")
+    compact = []
     for exp, runs, latest in sorted(rows, key=lambda r: r[2], reverse=True):
         updated = datetime.datetime.fromtimestamp(latest / 1000).strftime("%Y-%m-%d %H:%M") if latest else ""
         table.add_row(escape(exp.name), exp.experiment_id, str(runs), updated)
-    console.print(table)
+        compact.append((exp.name, f"id {exp.experiment_id}, {runs} run{'s' * (runs != 1)}"
+                        + (f", last run {updated}" if updated else "")))
+    _print_table(table, compact)
 
 
 @app.command()
@@ -566,12 +606,20 @@ def models():
         return
     table = Table(title="Registered models")
     for col in ("name", "latest", "champion", "metric", "validation", "test"):
-        table.add_column(col, overflow="fold")
+        table.add_column(col, overflow="fold", no_wrap=col == "name")
+    compact = []
     for name, latest, champion, tags in sorted(rows):
         table.add_row(escape(name), "" if latest is None else str(latest),
                       "" if champion is None else str(champion), escape(tags.get("orbit.metric", "")),
                       escape(_score(tags.get("orbit.val_score"))), escape(_score(tags.get("orbit.test_score"))))
-    console.print(table)
+        scores = ", ".join(f"{label} {_score(tags.get(key))}" for label, key in
+                           (("validation", "orbit.val_score"), ("test", "orbit.test_score"))
+                           if _score(tags.get(key)))
+        compact.append((name, ", ".join(x for x in (
+            f"latest {latest}" if latest is not None else "",
+            f"champion {champion}" if champion is not None else "",
+            tags.get("orbit.metric", ""), scores) if x)))
+    _print_table(table, compact)
 
 
 @app.command()
@@ -622,11 +670,15 @@ def _serve_manage(srv, list_: bool, stop: str | None):
         return
     table = Table(title="Serving containers")
     for col in ("name", "model", "version", "endpoint", "up"):
-        table.add_column(col, overflow="fold")
+        table.add_column(col, overflow="fold", no_wrap=col in ("name", "model"))
+    compact = []
     for c in containers:
-        table.add_row(escape(c.name), escape(c.model), escape(c.version),
-                      f"http://127.0.0.1:{c.port}" if c.port else "", escape(c.uptime))
-    console.print(table)
+        endpoint = f"http://127.0.0.1:{c.port}" if c.port else ""
+        table.add_row(escape(c.name), escape(c.model), escape(c.version), endpoint, escape(c.uptime))
+        compact.append((c.name, ", ".join(x for x in (
+            f"model {c.model}", f"version {c.version}" if c.version else "", endpoint,
+            c.uptime if c.uptime.lower().startswith("up") else f"up {c.uptime}" if c.uptime else "") if x)))
+    _print_table(table, compact)
 
 
 def _serve_start(srv, model: str, version: int | None, alias: str | None, port: int | None,

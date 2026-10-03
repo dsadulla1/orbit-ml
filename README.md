@@ -115,6 +115,20 @@ table, old `.xls` files must be saved as `.xlsx` or CSV first), folders, zip fil
 URLs; text files such as a data description are read and shown to the model. `orbit explore` takes
 the same sources, so you can check what orbit finds before a run.
 
+- Delimiter (comma, semicolon, tab or pipe), text encoding (UTF-8 with or without a BOM, otherwise
+  Windows-1252/Latin-1) and decimal comma are detected per file; `.tsv` files are always tab
+  separated. When a file is not plain comma/UTF-8, a "read X with delimiter ';'" line appears in the
+  setup output and the report.
+- Zip files may contain folders and further zip files (up to 6 levels deep, 20 archives and 2 GB
+  in total). Anything skipped is listed with the reason; for very deep or large nesting, unzip it
+  and pass the folder.
+- Data profiles in `orbit explore` and in the prompt that picks the table and target use every row
+  of a table up to 100,000 rows. Larger tables are profiled on a seeded random sample of 100,000
+  rows (never just the top of the file), and the output says so. The training data itself is
+  always read in full.
+- When several tables contain the target column, the setup output names the one that was used,
+  why, and the other candidates with their row counts.
+
 - `--goal` states the problem in plain language and `--eval` says how to judge it, as a metric
   name or in words ("RMSE between log prices").
 - Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its

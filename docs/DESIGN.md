@@ -11,8 +11,8 @@
 
 | Module | Responsibility |
 |---|---|
-| `sources.py` | Fetch/copy local files, folders, zips and URLs into the run folder (size caps, safe extraction); collect tables (CSV/TSV, and each `.xlsx` sheet converted to CSV) and documents |
-| `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry |
+| `sources.py` | Fetch/copy local files, folders, zips and URLs into the run folder (size caps, safe extraction); collect tables (CSV/TSV, and each `.xlsx` sheet converted to CSV) and documents; zips inside zips are followed within depth, archive-count and total-size budgets |
+| `planner.py` | Choose the primary table, target and metric from the problem statement; LLM proposals are validated against the files and the metric registry. Also the single table reader `read_table`: it sniffs delimiter, encoding and decimal mark, and profiles use all rows or a seeded random sample (`load_for_profile`) |
 | `problem.py` | Resolve sources, plan, and prepare the task in one call |
 | `task.py` | Split data into test + k validation folds (or one split), hide labels, profile the data, compute a baseline |
 | `helpers.py` | Optional helper for generated scripts, copied into every sandbox input directory as `orbit_helpers.py` (numpy and pandas only): consistent text encoding, NaN-filled frames, validated `predictions.csv`, and `Preprocessor`, a scikit-learn transformer that lets an exported pipeline take raw rows |

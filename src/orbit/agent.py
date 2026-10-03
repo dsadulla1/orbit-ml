@@ -44,7 +44,7 @@ class SearchConfig:
     max_debug_depth: int = 3
     debug_prob: float = 0.5
     explore_prob: float = 0.2
-    exec_timeout: int = 600
+    exec_timeout: int = 600            # seconds for one experiment, shared by its folds
     cpus: float = 4
     seed: int = 0
     patience: int | None = None        # stop after this many working experiments without a clear gain
@@ -121,7 +121,8 @@ class Agent:
         self.on_node = on_node or (lambda node, agent: None)
         self.rng = random.Random(config.seed)
         self.journal = Journal()
-        self.system = prompts.system_prompt(task, config.exec_timeout, config.cpus)
+        self.run_timeout = prompts.run_timeout(config.exec_timeout, task.n_folds)
+        self.system = prompts.system_prompt(task, self.run_timeout, config.cpus)
         self._ids = None
 
     # ---- policy -------------------------------------------------------------------------
@@ -226,7 +227,7 @@ class Agent:
         for k in range(1, n + 1):
             fwork = self._fwork(workdir, k)
             with self._span("sandbox", fold=k) as span:
-                result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.cfg.exec_timeout)
+                result = self.sandbox.run(node.code, fwork, task.fold_dir(k), self.run_timeout)
                 span.set(seconds=round(result.duration, 2), ok=result.ok, timed_out=result.timed_out)
             node.duration += result.duration
             if result.peak_mem_mb is not None:

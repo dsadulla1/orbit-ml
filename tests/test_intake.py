@@ -282,6 +282,28 @@ def test_explore_on_a_bank_shaped_zip_leaves_nothing_behind(tmp_path, monkeypatc
     for name in ("bank-full.csv", "bank.csv", "bank-additional-full.csv", "bank-additional.csv"):
         assert name in r.output
     assert "bank-names.txt" in r.output and "bank-additional-names.txt" in r.output
-    assert "read bank-full.csv with delimiter ';'" in r.output
+    flat = " ".join(r.output.split())
+    assert ("read 4 tables (bank-additional-full.csv, bank-additional.csv, bank-full.csv and 1 more) "
+            "with delimiter ';'") in flat
+    assert flat.count("with delimiter") == 1  # one grouped note, not one per table
     assert "profile of all 300 rows" in r.output and "TARGET" in r.output
     assert list(work.iterdir()) == []
+
+
+def test_format_notes_group_files_that_share_a_format(tmp_path):
+    from orbit.planner import format_notes
+
+    paths = []
+    for name in ("a.csv", "b.csv", "c.csv", "d.csv", "e.csv"):
+        (tmp_path / name).write_text("x;y\n1;2\n3;4\n")
+        paths.append(tmp_path / name)
+    plain = tmp_path / "plain.csv"
+    plain.write_text("x,y\n1,2\n3,4\n")
+    one = tmp_path / "one.csv"
+    one.write_text("x|y\n1|2\n")
+    notes = format_notes([*paths, plain, one])
+    assert notes == ["read 5 tables (a.csv, b.csv, c.csv and 2 more) with delimiter ';'",
+                     "read one.csv with delimiter '|'"]
+    assert format_notes(paths[:2]) == ["read a.csv and b.csv with delimiter ';'"]
+    assert format_notes(paths[:3]) == ["read a.csv, b.csv and c.csv with delimiter ';'"]
+    assert format_notes([plain]) == []

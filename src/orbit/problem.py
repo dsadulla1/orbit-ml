@@ -4,7 +4,7 @@ import shutil
 import urllib.parse
 from pathlib import Path
 
-from .planner import format_note, plan
+from .planner import format_notes, plan
 from .sources import resolve
 from .task import Task, TaskSpec, prepare
 
@@ -56,7 +56,7 @@ def _setup(sources, run_dir, goal, eval_text, target, folds, seed, llm, time_col
     p = plan(resolved.tables, resolved.docs, goal=goal, eval_text=None if named else eval_text,
              target=target, metric=eval_text if named else None, llm=llm, table=table)
     used = [p.primary, *p.extras]
-    formats = [n for n in map(format_note, used) if n]
+    formats = format_notes(used)
     spec = TaskSpec(str(p.primary), p.target, p.metric, goal, folds=folds, seed=seed,
                     sources=list(sources), eval_text=eval_text, extras=[str(x) for x in p.extras],
                     docs=[str(x) for x in p.docs], id_column=p.id_column,

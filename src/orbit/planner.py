@@ -164,8 +164,8 @@ def describe_format(path: Path) -> dict:
     return {"delimiter": delim, "encoding": enc, "decimal": decimal}
 
 
-def format_note(path: Path) -> str | None:
-    """A sentence when the file is not plain comma / UTF-8 / dot-decimal, else None."""
+def _format_parts(path: Path) -> str:
+    """The unusual parts of how a file is written, as text; empty for plain comma / UTF-8 / dot."""
     fmt = describe_format(path)
     parts = []
     if fmt["delimiter"] != ",":
@@ -174,7 +174,33 @@ def format_note(path: Path) -> str | None:
         parts.append(f"decimal mark {fmt['decimal']!r}")
     if not fmt["encoding"].startswith("utf-8"):
         parts.append(f"{fmt['encoding']} encoding")
-    return f"read {Path(path).name} with {', '.join(parts)}" if parts else None
+    return ", ".join(parts)
+
+
+def format_note(path: Path) -> str | None:
+    """A sentence when the file is not plain comma / UTF-8 / dot-decimal, else None."""
+    parts = _format_parts(path)
+    return f"read {Path(path).name} with {parts}" if parts else None
+
+
+def format_notes(paths) -> list[str]:
+    """One sentence per way of writing a file: files that share a format are grouped, so four
+    semicolon-separated tables give one note, not four."""
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        parts = _format_parts(Path(path))
+        if parts:
+            groups.setdefault(parts, []).append(Path(path).name)
+    notes = []
+    for parts, names in groups.items():
+        if len(names) == 1:
+            notes.append(f"read {names[0]} with {parts}")
+        elif len(names) <= 3:
+            notes.append(f"read {', '.join(names[:-1])} and {names[-1]} with {parts}")
+        else:
+            notes.append(f"read {len(names)} tables ({', '.join(names[:3])} and {len(names) - 3} more) "
+                         f"with {parts}")
+    return notes
 
 
 def _check_columns(path: Path, df: pd.DataFrame) -> None:

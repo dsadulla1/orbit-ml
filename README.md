@@ -2,24 +2,43 @@
 
 **An LLM agent that designs, runs and compares ML experiments on its own, in a sandbox, with scores you can trust.**
 
-Describe a prediction problem in plain language and point orbit at the data: a CSV, a folder
-of tables and notes, a zip file or a URL. It asks an LLM to write a complete training
-script, runs that script in a locked-down Docker container, scores the predictions
-against labels the script never sees, and decides what to try next: a new approach,
-a fix for a crash, or a focused improvement to the current best. Every experiment is
-logged to MLflow (or Weights & Biases), and the run ends with a short written report
-whose numbers are checked against the actual results.
+Describe a prediction problem in plain language and point orbit at the data: a CSV, an Excel
+workbook, a folder of tables and notes, a zip file or a URL. orbit asks an LLM to write a complete
+training script, runs it in a locked-down Docker container, scores the predictions against labels
+the script never sees, and decides what to try next: a new approach, a fix for a crash, or a
+focused improvement to the current best. Every experiment is logged to MLflow (or Weights & Biases),
+the run ends with a short written report whose numbers are checked against the actual results, and
+the best model can be registered and served over HTTP.
 
 ```
 $ orbit run examples/data/breast_cancer.csv --target diagnosis --steps 15
 $ orbit run my_task/ --goal "Predict each house's sale price" --eval "RMSE between log prices"
+$ orbit run https://example.com/train.csv --goal "Predict who will churn"
 ```
+
+## What you get
+
+- **Honest scores.** Experiments are ranked by cross-validation on rows the generated code never
+  sees labels for; a held-out test split is scored once, for the winner. The report shows the
+  spread across folds, so a gain inside the noise is visible.
+- **Isolation.** Generated code only ever runs in a fresh, locked-down container.
+- **Any LLM.** Plain chat completions work with OpenAI, a local vLLM server, Ollama or any
+  OpenAI-compatible endpoint; no tool calling is needed.
+- **Problems in plain language.** State the goal and how to judge it, give any number of data
+  sources, optionally name the target; orbit works out the rest and checks it against the files.
+- **A report you can read.** `report.md` and a standalone `report.html` with charts, the
+  leaderboard, failures and the best script; the narrative is reviewed against the data and falls
+  back to a deterministic template if it cannot be made consistent.
+- **Tracking.** One MLflow experiment per problem, a nested run per experiment, traces of every
+  search step, host and per-container resource use.
+- **Models you can use.** The best approach is refit on all labeled rows, verified, registered in
+  the MLflow model registry and served with `orbit serve`.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    CSV[CSV + target] --> T[Task setup<br/>split, hide labels, profile]
+    D[Data sources + goal] --> T[Task setup<br/>plan, split, hide labels, profile]
     T --> A{Agent policy}
     A -- draft / improve / debug --> L[LLM<br/>OpenAI or any compatible server]
     L -- plan + script --> S[Docker sandbox<br/>no network, read-only data]
@@ -28,27 +47,31 @@ flowchart LR
     J --> A
     J --> TR[MLflow / W&B]
     J --> R[Report<br/>numbers verified]
+    J --> E[Export + registry<br/>verified model]
+    E --> SV[orbit serve<br/>HTTP endpoint]
 ```
 
-- **Search.** Experiments form a tree. orbit drafts a few independent solutions, then
-  alternates between repairing failed ones (using their stack traces) and refining the best
-  one. Budgets cap steps, wall time and tokens.
-- **Honest scores.** The sandbox only gets the training data and *unlabeled* rows. Those rows
-  mix validation rows (used to rank experiments, by default with 5-fold cross-validation on small
-  datasets) and a test split (scored once, for the final winner). The generated code can't see either set of labels, so it can't overfit or
-  misreport its own score.
-- **Isolation.** Each experiment runs in a fresh container: no network, read-only root
-  filesystem, all capabilities dropped, CPU/memory/process limits and a timeout. The dataset is
-  mounted read-only. gVisor is supported for stronger isolation.
-- **Any model.** orbit uses plain chat completions (a plan plus one Python code block), so it works
-  with OpenAI, a local [vLLM](https://docs.vllm.ai) server, Ollama, or any other
-  OpenAI-compatible endpoint. No tool-calling support is required.
-- **Reusable model.** `orbit.export.export_best` refits the best approach on all labeled rows and
-  saves one pickled scikit-learn pipeline that takes raw feature rows. Each model is checked
-  with an allow-list scan of the pickle and by reloading it in the sandbox and reproducing its
-  predictions; see [Model export](docs/DESIGN.md#model-export).
-- **Traceable.** Each experiment keeps its prompt, response, script, stdout/stderr and score,
-  in the run folder and in the tracker.
+- **Search.** Experiments form a tree. orbit drafts a few independent solutions, then alternates
+  between repairing failed ones (using their stack traces) and refining the best one. Budgets cap
+  steps, wall time and tokens; `--patience` stops a search that has stopped improving.
+- **Honest scores.** The sandbox only gets training data and *unlabeled* rows. Those rows mix
+  validation rows (used to rank experiments; by default 5-fold cross-validation on small datasets,
+  forward-chaining folds with `--time-col`) and a test split (scored once, for the final winner).
+  The generated code cannot see either set of labels, so it cannot overfit or misreport its score.
+- **Isolation.** Each experiment runs in a fresh container: no network, read-only root filesystem,
+  all capabilities dropped, CPU/memory/process limits and a timeout. The data is mounted
+  read-only. gVisor is supported for stronger isolation.
+- **Helpers.** Generated scripts can use a small bundled helper (`data/orbit_helpers.py`, numpy and
+  pandas only): `d = load()` gives numeric feature frames with text columns encoded consistently
+  for train and test, NaN-filled copies and the target, and `d.save(pred)` validates and writes
+  `predictions.csv`. The raw CSVs and extra tables stay available for custom feature engineering;
+  the helper holds no labels.
+- **Reusable model.** After the search, the best approach is refit on all labeled rows and saved as
+  one pickled scikit-learn pipeline that takes raw feature rows. It is accepted only if an
+  allow-list scan of the pickle passes and it reproduces its predictions after being reloaded in
+  the sandbox; see [Model export](docs/DESIGN.md#model-export).
+- **Traceable.** Each experiment keeps its prompt, response, script, logs and score, in the run
+  folder and in the tracker.
 
 ## Quickstart
 
@@ -57,80 +80,103 @@ Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), Docker.
 ```bash
 git clone https://github.com/dsadulla1/orbit-ml && cd orbit-ml
 uv sync
-cp .env.example .env                       # add OPENAI_API_KEY
+cp .env.example .env                       # add OPENAI_API_KEY, or point it at a local server (below)
 
 docker compose --env-file .env -f docker/compose.yaml build sandbox
-docker compose --env-file .env -f docker/compose.yaml up -d mlflow   # optional: tracking UI on :5000
+docker compose --env-file .env -f docker/compose.yaml up -d mlflow   # tracking UI on :5000
 
 uv run orbit doctor                        # checks LLM, Docker, sandbox image, tracker
-uv run python examples/make_datasets.py    # optional: regenerate the example CSVs
 uv run orbit run examples/data/breast_cancer.csv --target diagnosis --steps 15
+uv run orbit results runs/<the new run folder>
 ```
+
+Open `runs/<run>/report.html` in a browser, or the MLflow UI at http://localhost:5000. To serve
+the model afterwards, see [docs/mlflow.md](docs/mlflow.md#serving-a-model).
 
 Each run writes a folder under `runs/`:
 
 ```
 runs/20261001-120000-breast_cancer/
   report.md          summary, leaderboard, run stats
-  report.html        the same as one standalone page: charts, leaderboard, best script (open in a browser)
+  report.html        the same as one standalone page: charts, leaderboard, best script
   journal.json       every experiment: stage, parent, plan, score, error, tokens
   task.json          metric, baseline, data profile
   input/             train.csv + unlabeled test.csv (+ orbit_meta.json, orbit_helpers.py), or fold_1/ ... fold_k/
   hidden/labels.csv  validation/test labels (never mounted)
   nodes/007/         solution.py, prompt.md, response.md, stdout.txt, stderr.txt, predictions.csv
+  export/            the verified model.pkl and the export attempts
+  tracking.json      where the run lives in MLflow
 ```
 
-Generated scripts can use a small bundled helper (`data/orbit_helpers.py`, numpy and pandas only):
-`d = load()` gives numeric feature frames with text columns encoded consistently for train and
-test (plus NaN-filled copies), and `d.save(pred)` validates and writes `predictions.csv`. The raw
-CSVs and any extra tables stay available for custom feature engineering, and the helper holds no
-labels.
+## Describing a problem
+
+`DATA` can be any mix of CSV/TSV files, Excel workbooks (`.xlsx`; each sheet with data becomes a
+table, old `.xls` files must be saved as `.xlsx` or CSV first), folders, zip files and `http(s)`
+URLs; text files such as a data description are read and shown to the model. `orbit explore` takes
+the same sources, so you can check what orbit finds before a run.
+
+- `--goal` states the problem in plain language and `--eval` says how to judge it, as a metric
+  name or in words ("RMSE between log prices").
+- Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
+  answer against the files.
+- Tables that don't hold the target are available to the generated code under `data/extra/`
+  (read-only), so they can be joined in. A table that contains the target column is ignored,
+  because the generated code could read the labels from it (combine such files into the training
+  table first), and so is a table that only repeats the training columns without the target.
+  Folders named `runs`, `hidden` or `mlruns` and earlier orbit runs are never copied.
+- Everything you point at is copied into the run folder. URLs are fetched with the host's network
+  access, so only use sources you trust.
+- Run folders are named `<timestamp>-<name>`; set the name with `--name`. A setup that fails leaves
+  no folder behind.
+
+**Validation.** By default rows are split at random. For forecasting-style problems pass
+`--time-col COL`: rows are ordered by that column (dates or numbers; rows without a usable value
+are dropped and noted), the latest rows become the test split, and validation rows are always later
+than the rows used for training (one split, or forward-chaining folds that train on everything
+before each validation block). The column stays available to the generated code as a feature.
+`--folds K` sets the number of folds (1 = a single split); datasets above about 10,000 rows use a
+single split by default because every fold costs a sandbox run per experiment.
+
+**Metrics.** `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`,
+`f1_macro`, `rmse`, `rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`. By default orbit
+picks `roc_auc` for binary targets, `accuracy` for multiclass and `rmse` for regression. Each run
+also reports a baseline, the best constant prediction for the metric, as a reference.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `orbit explore DATA... [-t TARGET]` | List the tables and documents found in the sources and print the data profile the agent will see (no LLM call) |
-| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search |
+| `orbit run DATA... [-t TARGET] [--goal "..."] [--eval "..."] [--steps N] [--minutes M] [--folds K] [--time-col COL] [--patience N] [--name NAME] [--experiment NAME] [--no-export]` | Solve a problem: run a search, write the report, export and register the best model |
 | `orbit results RUN_DIR [--json] [--html FILE]`, `orbit results --mlflow RUN_ID` | Everything about a run: best model, scores, every experiment; as a table, JSON or HTML, from the run folder or straight from MLflow |
-| `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry (needs the LLM and Docker; `orbit run` does this itself unless `--no-export`) |
-| `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
-| `orbit serve MODEL [--version N \| --alias NAME] [--port P] [--name NAME]`, `orbit serve --list`, `orbit serve --stop NAME\|all` | Serve a registered model (`champion` by default) with MLflow's scoring server in a dedicated Docker container on 127.0.0.1 |
-| `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model) |
-| `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit compare RUN_DIR` | Table of every experiment in a run, best first |
 | `orbit summarize RUN_DIR [--no-llm]` | Rewrite `report.md` (LLM narrative or deterministic template) |
+| `orbit export RUN_DIR [--model-name NAME] [--no-register] [--force-champion] [--attempts N]` | Refit a run's best experiment on all labeled rows, verify it and register it in the MLflow model registry |
+| `orbit models` | List the registered MLflow models with their latest version and the `champion` version's metric and scores |
+| `orbit serve MODEL [--version N \| --alias NAME] [--port P]`, `orbit serve --list`, `orbit serve --stop NAME\|all` | Serve a registered model (`champion` by default) in a dedicated Docker container on 127.0.0.1 |
+| `orbit predict ENDPOINT ROWS.csv [--out FILE] [--keep-columns]` | Score a CSV of raw feature rows against a running endpoint (a URL, or the name of a served model) |
+| `orbit experiments` | List the MLflow experiments (one per problem) with their number of runs and last update |
 | `orbit doctor` | Check the LLM endpoint, Docker, the sandbox image and the tracker |
 
-### Describing a problem
+`orbit <command> --help` lists every option.
 
-`DATA` can be any mix of CSV/TSV files, Excel workbooks (`.xlsx`), folders, zip files and `http(s)`
-URLs; text files such as a data description are read and shown to the model. Each Excel sheet that
-has data becomes a table (converted to CSV in the run folder; old `.xls` files must be saved as
-`.xlsx` or CSV first). `orbit explore` takes the same sources, so you can check what orbit finds
-before a run. Run folders are named `<timestamp>-<name>`; set the name with `--name` (default: taken
-from the first source). A setup that fails leaves no run folder behind. `--goal` states the problem in plain language and
-`--eval` says how to judge it, either as a metric name or in words ("RMSE between log prices").
-Leave out `--target` and orbit asks the LLM which table and column to predict, then checks its
-answer against the files. Tables that don't hold the target are made available to the generated
-code under `data/extra/` (read-only), so they can be joined in. A table that contains the target
-column is ignored, because the generated code could read the labels from it (combine such files
-into the training table first), and so is a table that only repeats the training columns without
-the target. Folders named `runs`, `hidden` or `mlruns` and earlier orbit runs are never copied. Everything you point at is copied into the run folder.
-URLs are fetched with the host's network access, so only use sources you trust.
+## MLflow, registry and serving
 
-Validation: by default rows are split at random. For forecasting-style problems pass
-`--time-col COL`: rows are ordered by that column (dates or numbers; rows without a usable value are
-dropped and noted), the latest rows become the test split, and validation rows are always later than
-the rows used for training (one split, or forward-chaining folds that train on everything before each
-validation block). The column stays available to the generated code as a feature. `--patience N`
-ends the search early once N working experiments in a row fail to beat the last clear improvement by
-more than its spread across folds (with a single split, by any margin).
+With MLflow (the default tracker) each problem is its own experiment, runs in it are tagged and
+comparable, every search step is traced, and the host's and each container's resource use is
+recorded. The best model is registered with a `champion` alias and `orbit serve` turns it into an
+HTTP endpoint:
 
-Metrics: `roc_auc`, `pr_auc` and `log_loss` (binary), `accuracy`, `balanced_accuracy`, `f1_macro`, `rmse`,
-`rmsle` (RMSE of log1p values, targets >= 0), `mae`, `r2`.
-By default orbit picks `roc_auc` for binary targets, `accuracy` for multiclass and `rmse` for
-regression. Each run also reports a feature-free baseline for reference.
+```bash
+docker compose --env-file .env -f docker/compose.yaml build serve   # once
+uv run orbit serve my-model
+uv run orbit predict my-model new_rows.csv --out scored.csv
+uv run orbit serve --stop all
+```
+
+[docs/mlflow.md](docs/mlflow.md) covers experiments, traces, system metrics, the registry's
+`champion` rule and serving in detail, including what runs where and why the serving container is
+separate from the experiment sandbox.
 
 ## Using a local model (vLLM)
 
@@ -163,7 +209,7 @@ All settings come from environment variables (or `.env` in the working directory
 | `ORBIT_LLM_TEMPERATURE`, `ORBIT_LLM_MAX_TOKENS` | unset | Only sent when set |
 | `ORBIT_SANDBOX_IMAGE` | `orbit-sandbox:latest` | Image that runs experiments |
 | `ORBIT_SANDBOX_CPUS` / `ORBIT_SANDBOX_MEMORY` | `4` / `8g` | Per-experiment limits |
-| `ORBIT_SANDBOX_TIMEOUT` | `600` | Seconds per experiment |
+| `ORBIT_SANDBOX_TIMEOUT` | `600` | Seconds per experiment (per fold with cross-validation) |
 | `ORBIT_SANDBOX_RUNTIME` | unset | e.g. `runsc` for gVisor |
 | `ORBIT_SERVE_IMAGE` / `ORBIT_SERVE_MEMORY` | `orbit-serve:latest` / `4g` | Image and memory limit of `orbit serve` containers |
 | `MLFLOW_TRACKING_URI` | MLflow default | e.g. `http://localhost:5000` |
@@ -174,114 +220,44 @@ All settings come from environment variables (or `.env` in the working directory
 
 `--tracker auto|mlflow|wandb|none` overrides the tracker choice per run.
 
-Each problem gets its own MLflow experiment, named after `--name` or the first data source (or set
-`--experiment NAME` / `ORBIT_EXPERIMENT`), so runs inside it are comparable. Running the same
-problem again adds another run to the same experiment; each run is tagged with its goal, metric,
-validation scheme and a data fingerprint (row count and file hash) so attempts can be told apart.
-`orbit experiments` lists them. An experiment deleted in the MLflow UI is restored when its name is
-used again.
+## Security model
 
-With MLflow, every search step is also recorded as a trace in the problem's experiment: the
-prompt, the model call (including token counts), each fold's sandbox execution and scoring, with
-durations and errors, so you can see how a step unfolded. Traces can be filtered by the tags
-`orbit.node`, `orbit.stage` and `orbit.status`, and the HTML report links to them. They contain the
-prompts, which include the data profile and any documentation text you supplied, just like the
-artifacts do. Set `ORBIT_TRACING=off` to switch them off. A tracing error is logged once and
-tracing is then disabled for the run; the search carries on.
+Generated code is untrusted. orbit never runs it on the host, and the experiment sandbox has no
+network and no access to labels or credentials. All logging happens in the orchestrator.
 
-With MLflow, the parent run also records host system metrics (CPU, memory and, when the NVIDIA
-driver is reachable, GPU utilisation and memory) every 5 seconds, which is useful when a local LLM
-server shares the machine. Each experiment's run gets `peak_mem_mb` and `cpu_pct_mean`, the
-sandbox container's peak memory and mean CPU (100 = one busy core; for cross-validation the
-maximum and the mean over folds), sampled with `docker stats` from outside the container, so you
-can see which experiment was heavy or close to its memory limit. The HTML report shows peak memory
-per experiment. Set `ORBIT_SYSTEM_METRICS=off` to skip the system metrics; the sampling interval
-follows `MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL`. Short experiments may finish before the first
-sample, in which case the values are left empty.
+- Anyone who can run orbit can talk to the Docker daemon, which is root-equivalent on the host.
+- MLflow and the model endpoints have no authentication and are published on 127.0.0.1 only; put
+  your own proxy in front before exposing them.
+- A registered model is a pickle written by generated code. orbit scans it against an allow-list
+  and reloads it in the sandbox before accepting it, and it is only ever loaded inside the serving
+  container, which has no access to MLflow's data. The scan is defence in depth, not a guarantee.
+- URL sources are fetched with the host's network access.
 
-### Model registry
+Details are in [docs/DESIGN.md](docs/DESIGN.md) and [docker/README.md](docker/README.md).
 
-After a search with MLflow, `orbit run` exports the best experiment (see [Model export](docs/DESIGN.md#model-export))
-and registers it as a new version of an MLflow model named after the experiment (`orbit export
-RUN_DIR --model-name NAME` does the same for an existing run). The version is logged on the run's
-parent run as a pyfunc model that takes raw feature rows and returns the predicted probability (for
-probability metrics) or value, with the pickled model, the helper module, an input example, a
-signature that only names the input columns, and the sandbox's pinned library versions as its
-requirements; it needs those versions to load. Version tags record the run, experiment, metric,
-validation and test scores, baseline, goal, validation scheme and data fingerprint.
+## Limitations
 
-The alias `champion` marks the version to serve. It moves to a new version when there is no
-champion yet, when the new validation score is at least as good as the champion's, or when the two
-cannot be compared (a different metric or data fingerprint); `--force-champion` always moves it.
-Otherwise it stays, and the output says so. The model is refit on every labeled row, so the honest
-performance estimate is the search's cross-validation score and held-out test score, which are
-stored with the version, and not the refit's own predictions. `--no-export` skips this step; export
-and registration problems print a warning and never change a run's results. Only MLflow runs
-register models; W&B and `none` skip it.
-
-If the MLflow server is unreachable, orbit logs a warning per call and carries on. It sets short
-HTTP retry defaults (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=1`, `MLFLOW_HTTP_REQUEST_TIMEOUT=15`) so an
-outage costs seconds per experiment, not minutes; set those variables yourself to override.
-
-### Serving a model
-
-Build the serving image once (it extends the sandbox image, so build that first):
-
-```bash
-docker compose --env-file .env -f docker/compose.yaml build serve
-```
-
-Then serve a registered model; `MODEL` is a name (the version with the alias `champion`), or a
-`models:/...` URI, and `--version` or `--alias` pick another one:
-
-```bash
-uv run orbit serve retail-spend-90d --port 8099
-```
-
-orbit checks that the model exists, starts the container, waits until it answers and prints the
-endpoint, the container name and a `curl` command built from the model's saved input example. The
-request body is `{"dataframe_records": [{...raw feature columns...}]}` and the response is
-`{"predictions": [{"prediction": 55.47}]}`. Columns that are not features (the target, `orbit_id`,
-anything else) are ignored; a missing feature column is a 400 with the column's name.
-
-```bash
-uv run orbit predict retail-spend-90d new_customers.csv --out scored.csv   # or an http://127.0.0.1:PORT URL
-uv run orbit serve --list                                                 # running endpoints
-uv run orbit serve --stop all                                             # stop and remove them
-```
-
-`orbit predict` sends the rows in chunks of 500 and writes the `prediction` column in the
-input's order (`--keep-columns` repeats the input columns first).
-
-The container runs `mlflow models serve` with the sandbox's pinned libraries, so the model loads
-exactly as it was fitted. It downloads the model from the tracking server over the Compose
-network and mounts none of MLflow's data. The endpoint is published on 127.0.0.1 only and has no
-authentication: put your own proxy in front of it before exposing it to a network. MLflow's own
-Host-header check applies to the container's requests to the tracking server, so orbit points it
-at the server's address on the Compose network; if you restricted `MLFLOW_ALLOWED_HOSTS`, keep that
-address allowed. See [Serving](docs/DESIGN.md#serving).
+- The quality of the search depends on the LLM. Generated scripts often fail (orbit repairs them
+  from their stack traces, but failures use up budget), and small local models fail more.
+- The default validation is random; use `--time-col` when later rows must be predicted from
+  earlier ones. Small datasets give noisy scores: look at the spread across folds.
+- Cross-validation runs every experiment once per fold, and the time limit applies to each run.
+- orbit targets one labeled table (plus extra tables to join). Several labeled files with the same
+  schema are not combined for you.
+- The exported model is refit on every labeled row, so its own predictions on those rows are not a
+  performance estimate: use the stored cross-validation and test scores.
+- Excel is read as `.xlsx` only; the data must be tabular.
 
 ## Querying runs from an AI assistant (MCP)
 
-MLflow ships an MCP server, so assistants such as Claude Code or Cursor can browse and
-compare orbit runs. See [docs/mcp.md](docs/mcp.md).
-
-## Security model
-
-Generated code is untrusted. orbit never runs it on the host, and the sandbox has no
-network and no access to labels or credentials. All logging happens in the orchestrator.
-Note that anyone who can run orbit can talk to the Docker daemon, which is root-equivalent on
-the host. Details are in [docs/DESIGN.md](docs/DESIGN.md) and [docker/README.md](docker/README.md).
+MLflow ships an MCP server, so assistants such as Claude Code or Cursor can browse and compare
+orbit runs. See [docs/mcp.md](docs/mcp.md).
 
 ## Development
 
-```bash
-uv sync
-uv run pytest
-```
-
-The tests replace the LLM with a scripted fake and run trusted fixture scripts in a
-subprocess, so they need neither an API key nor Docker.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `uv sync`, then `uv run pytest`; the tests replace
+the LLM with a scripted fake and run trusted fixture scripts in a subprocess, so they need neither
+an API key nor Docker for most of the suite.
 
 ## Related work
 

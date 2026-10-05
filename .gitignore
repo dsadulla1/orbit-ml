@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# logs
+.logs
+
 # orbit run outputs and trackers
 runs/
 mlruns/
@@ -18,3 +21,5 @@ wandb/
 
 # Local secrets
 .env
+# Added by code-review-graph
+.code-review-graph/

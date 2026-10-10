@@ -2,6 +2,10 @@
 
 **An LLM agent that designs, runs and compares ML experiments on its own, in a sandbox, with scores you can trust.**
 
+<a href="https://drive.google.com/file/d/1DgKU5c7CR_R0DuUr6vsXL1LDRWQ4tIfS/view?usp=sharing">
+  <img src="https://drive.google.com/thumbnail?id=1DgKU5c7CR_R0DuUr6vsXL1LDRWQ4tIfS&sz=w1280" width="100%" alt="Watch the orbit-ml demo"/>
+</a>
+
 Describe a prediction problem in plain language and point orbit at the data: a CSV, an Excel
 workbook, a folder of tables and notes, a zip file or a URL. orbit asks an LLM to write a complete
 training script, runs it in a locked-down Docker container, scores the predictions against labels
